@@ -1,0 +1,11 @@
+node_modules/
+.tgcloud/
+.secrets/
+.env
+.env.*
+!.env.example
+tgcloud/lib/private-settings.js
+*.tmp
+.DS_Store
+coverage/
+.local-data/

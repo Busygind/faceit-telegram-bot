@@ -1,0 +1,20 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1792109747791,
+      "tag": "0000_sturdy_agent_brand",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1792113571046,
+      "tag": "0001_smooth_sunset_bain",
+      "breakpoints": true
+    }
+  ]
+}

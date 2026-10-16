@@ -1,0 +1,29 @@
+# Credentials and runtime data in either implementation.
+**/.secrets/
+**/.secrets.*
+**/.env
+**/.env.*
+!**/.env.example
+**/tgcloud/lib/private-settings.js
+**/.local-data/
+**/.tgcloud/
+**/.sites-runtime/
+**/.wrangler/
+**/*.sqlite*
+**/*.db
+**/*.db-*
+# Reproducible generated output; cloud build/ contains source and is retained.
+**/node_modules/
+**/dist/
+**/out/
+**/.next/
+**/.vinext/
+**/coverage/
+**/next-env.d.ts
+**/*.log
+**/*.tmp
+**/*.tgz
+**/*.tar.gz
+**/.DS_Store
+**/.agents/
+**/.codex/
