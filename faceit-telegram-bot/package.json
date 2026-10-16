@@ -1,0 +1,24 @@
+{
+  "name": "faceit-telegram-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node scripts/check.mjs",
+    "demo": "node scripts/render-demo.mjs",
+    "configure": "node scripts/configure.mjs",
+    "deploy": "node scripts/deploy.mjs",
+    "local": "node local/run.mjs",
+    "local:check": "node local/run.mjs --check",
+    "bot": "node scripts/bot.mjs"
+  },
+  "devDependencies": {
+    "@noble/ciphers": "2.4.0",
+    "@tgcloud/cli": "0.2.0",
+    "esbuild": "0.28.2"
+  }
+}

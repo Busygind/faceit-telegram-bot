@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -x "$HOME/.local/bin/node" ]; then
+  NODE="$HOME/.local/bin/node"
+elif command -v node >/dev/null 2>&1; then
+  NODE=$(command -v node)
+else
+  printf '%s\n' 'Node.js 24+ is required. No secret values printed.' >&2
+  exit 1
+fi
+exec "$NODE" "$ROOT/scripts/bot.mjs" "$@"
