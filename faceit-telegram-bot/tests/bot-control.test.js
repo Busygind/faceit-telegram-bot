@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
@@ -245,13 +245,20 @@ test('checkpoint reads SQLite offset in read-only mode and never invents a missi
   assert.deepEqual(await readFile(path), before);
 });
 
-test('root wrapper accepts commands without Node PATH setup and rejects invalid input before network', async () => {
+test('root wrapper accepts commands without Node PATH setup and rejects invalid input before network', async t => {
   const { spawnSync } = await import('node:child_process');
+  const home = await mkdtemp(join(tmpdir(), 'faceit-wrapper-home-test-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const bin = join(home, '.local/bin');
+  await mkdir(bin, { recursive: true });
+  await symlink(process.execPath, join(bin, 'node'));
   const wrapper = new URL('../bot', import.meta.url).pathname;
-  const result = spawnSync(wrapper, ['invalid'], { encoding: 'utf8', env: { ...process.env, PATH: '/usr/bin:/bin' } });
+  const result = spawnSync(wrapper, ['invalid'], { encoding: 'utf8', env: { ...process.env, HOME: home, PATH: '/usr/bin:/bin' } });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /SWITCH_ARGUMENTS/);
+  assert.ok(!result.stderr.includes(SECRET));
   assert.ok(!result.stderr.includes(' at '));
+  assert.equal(result.stdout, '');
 });
 
 

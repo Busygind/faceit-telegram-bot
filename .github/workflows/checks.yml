@@ -10,11 +10,15 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        project: [faceit-telegram-bot, faceit-telegram-bot-sites]
+        include:
+          - project: faceit-telegram-bot
+            runner: macos-15
+          - project: faceit-telegram-bot-sites
+            runner: ubuntu-latest
     defaults:
       run:
         working-directory: ${{ matrix.project }}
