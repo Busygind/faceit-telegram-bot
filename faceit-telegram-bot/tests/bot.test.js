@@ -38,6 +38,116 @@ test('full group path has buttons and slash commands, scoped TS, poll, last and 
   assert.ok(!stored.includes('fixture password') && !stored.includes('203.0.113.10'));
 });
 
+test('previously unknown supergroups and ordinary groups work immediately without a chat allowlist', async (t) => {
+  const bot = await makeHarness(t, { settings: { allowedChatIds: [-10] } });
+  for (const [chatId, chatType] of [[-1004418477887, 'supergroup'], [-4418477887, 'group']]) {
+    const configuration = { chatId, chatType };
+    await bot.send('/menu', configuration);
+    assert.equal(bot.sent().at(-1).chat_id, chatId);
+    assert.ok(bot.sent().at(-1).reply_markup.inline_keyboard.length);
+    await bot.send('/setup', configuration);
+    assert.match(bot.sent().at(-1).text, /Доступ к боту: включён/);
+    await bot.send('/ts', configuration);
+    assert.match(bot.sent().at(-1).text, /TeamSpeak ещё не настроен/);
+    await bot.send(`/setts ts.example.org:9987 fixture-${-chatId}`, configuration);
+    await bot.click('ts', { ...configuration, userId: 2 });
+    assert.match(bot.sent().at(-1).text, new RegExp(`fixture-${-chatId}`));
+    await bot.send('/poll', { ...configuration, userId: 2 });
+    assert.equal(bot.sent('sendPoll').at(-1).chat_id, chatId);
+    await bot.send('/last ExplicitNick', { ...configuration, userId: 2 });
+    assert.equal(bot.renderedReports.at(-1).kind, 'last');
+    assert.equal(bot.sent('sendPhoto').at(-1).chat_id, chatId);
+    await bot.send('/setfaceit MyNick', { ...configuration, userId: 2 });
+    await bot.send('/stats', { ...configuration, userId: 2 });
+    assert.equal(bot.renderedReports.at(-1).kind, 'stats');
+    assert.equal(bot.renderedReports.at(-1).nickname, 'MyNick');
+    assert.equal((await bot.store.getPlayerLink(chatId, 2)).nickname, 'MyNick');
+    assert.equal(bot.sent('sendPhoto').at(-1).chat_id, chatId);
+  }
+  assert.equal(await bot.store.getSettings(-10), null);
+  assert.equal(await bot.store.getPlayerLink(-10, 2), null);
+  assert.notEqual((await bot.store.getSettings(-1004418477887)).ciphertext,
+    (await bot.store.getSettings(-4418477887)).ciphertext);
+  assert.ok(bot.sent().every(({ text }) => !/разрешён|конфигураци/.test(text)));
+});
+
+test('private chats and channels never invoke group actions, member lookup, FACEIT or chat storage', async (t) => {
+  const bot = await makeHarness(t);
+  for (const [chatId, chatType] of [[42, 'private'], [-1004418477887, 'channel']]) {
+    const configuration = { chatId, chatType };
+    for (const text of ['/setts ts.example.org:9987 fixture', '/ts', '/poll', '/last Nick', '/stats Nick', '/setfaceit Nick']) {
+      await bot.send(text, configuration);
+    }
+    for (const data of ['poll', 'ts', 'stats', 'myfaceit', 'continue:foreign']) await bot.click(data, configuration);
+  }
+  assert.equal(bot.calls.filter(({ method }) => method === 'getChatMember').length, 0);
+  assert.equal(bot.sent('sendPoll').length, 0);
+  assert.equal(bot.starts.length, 0);
+  assert.equal(bot.advances.length, 0);
+  assert.equal((await bot.db.all('SELECT * FROM chat_settings')).length, 0);
+  assert.equal((await bot.db.all('SELECT * FROM player_links')).length, 0);
+  assert.equal((await bot.db.all('SELECT * FROM report_jobs')).length, 0);
+});
+
+test('removed and kicked users cannot use commands or buttons in newly added groups', async (t) => {
+  const bot = await makeHarness(t, { apiOverrides: {
+    getChatMember: ({ user_id }) => ({ status: user_id === 3 ? 'left' : 'kicked' }),
+  } });
+  for (const userId of [3, 4]) {
+    const configuration = { userId, chatId: -1004418477887 };
+    for (const text of ['/poll', '/ts', '/setts ts.test:9987 fixture', '/setfaceit Nick', '/last Nick', '/stats Nick']) {
+      await bot.send(text, configuration);
+    }
+    for (const data of ['poll', 'ts', 'last', 'stats', 'myfaceit', 'continue:foreign']) await bot.click(data, configuration);
+  }
+  assert.equal(bot.starts.length, 0);
+  assert.equal(bot.advances.length, 0);
+  assert.equal(bot.sent('sendPoll').length, 0);
+  assert.equal((await bot.db.all('SELECT * FROM chat_settings')).length, 0);
+  assert.equal((await bot.db.all('SELECT * FROM player_links')).length, 0);
+  assert.ok(bot.renderedReports.every(({ kind, title }) => kind === 'notice' && title === 'Нет доступа'));
+});
+
+test('only Telegram group migration service fields move settings, retire old ids and preserve chat isolation', async (t) => {
+  const bot = await makeHarness(t);
+  const oldId = -4418477887;
+  const newId = -1004418477887;
+  await bot.send('/setts ts.example.org:9987 fixture-secret', { chatId: oldId, chatType: 'group' });
+  await bot.send('/setfaceit OldNick', { chatId: oldId, chatType: 'group', userId: 2 });
+  await bot.send(`/migrate ${oldId} ${newId}`, { chatId: oldId, chatType: 'group' });
+  assert.equal(await bot.store.getSettings(newId), null, 'user commands cannot migrate chats');
+  await bot.send('', { chatId: oldId, chatType: 'private', messageFields: { migrate_to_chat_id: newId } });
+  await bot.send('', { chatId: oldId, chatType: 'supergroup', messageFields: { migrate_to_chat_id: newId } });
+  await bot.send('', { chatId: newId, chatType: 'channel', messageFields: { migrate_from_chat_id: oldId } });
+  await bot.send('', { chatId: oldId, chatType: 'group',
+    messageFields: { migrate_to_chat_id: newId, migrate_from_chat_id: oldId } });
+  assert.equal(await bot.store.getSettings(newId), null, 'wrong chat types and ambiguous fields cannot migrate');
+  const migrationId = await bot.send('', { chatId: oldId, chatType: 'group', messageFields: { migrate_to_chat_id: newId } });
+  const migrated = await bot.store.getSettings(newId);
+  assert.equal(migrated.origin_chat_id, oldId);
+  assert.equal(await bot.store.allowed(oldId), false);
+  assert.equal(await bot.store.allowed(newId), true);
+  await bot.send('', { chatId: oldId, chatType: 'group', messageFields: { migrate_to_chat_id: newId } }, migrationId);
+  await bot.send('', { chatId: newId, messageFields: { migrate_from_chat_id: oldId } });
+  assert.deepEqual(await bot.store.getSettings(newId), migrated, 'the paired service messages never remigrate or overwrite');
+  await bot.send('/ts', { chatId: newId, userId: 2 });
+  assert.match(bot.sent().at(-1).text, /fixture-secret/);
+  assert.equal(await bot.store.getPlayerLink(newId, 2), null, 'personal links never fall back to another chat id');
+  const messageCount = bot.sent().length;
+  await bot.send('/setts other.test:9987 changed', { chatId: oldId, chatType: 'group' });
+  await bot.send('/setfaceit Changed', { chatId: oldId, chatType: 'group', userId: 2 });
+  await bot.send('/menu', { chatId: oldId, chatType: 'group' });
+  await bot.click('ts', { chatId: oldId, chatType: 'group' });
+  assert.equal(bot.sent().length, messageCount);
+  assert.equal(await bot.store.getSettings(oldId), null);
+  assert.equal((await bot.store.getPlayerLink(oldId, 2)).nickname, 'OldNick');
+  assert.deepEqual(await bot.store.getSettings(newId), migrated);
+  // The new-chat service message also works when the old-chat service was never delivered.
+  await bot.send('', { chatId: -10055555, messageFields: { migrate_from_chat_id: -55555 } });
+  assert.equal(await bot.store.allowed(-55555), false);
+  assert.equal((await bot.store.getSettings(-10055555)).ciphertext, null);
+});
+
 test('TS mutation is admin-only, rejects forwarding/anonymous admins/edits/private chats', async (t) => {
   const bot = await makeHarness(t);
   await bot.send('/setts one.test:9987 original');
@@ -77,11 +187,11 @@ test('invalid TS changes preserve old credentials and deletion failure does not 
   assert.match(bot.sent().at(-1).text, /без пароля/);
 });
 
-test('access fails closed for nonmembers, bot senders, forbidden chat and member API failures', async (t) => {
+test('access fails closed for nonmembers, bot senders, invalid chat ids and member API failures', async (t) => {
   const bot = await makeHarness(t);
   await bot.send('/poll', { userId: 3 });
   await bot.send('/stats Player', { messageFields: { from: { id: 2, is_bot: true } } });
-  await bot.send('/poll', { chatId: -999 });
+  await bot.send('/poll', { chatId: 999 });
   await bot.click('poll', { userId: 3 });
   assert.equal(bot.sent('sendPoll').length, 0);
   assert.equal(bot.starts.length, 0);
@@ -120,7 +230,7 @@ test('continuation is persisted across bot invocations and bound to its chat and
   const continuation = bot.sent('sendPhoto').at(-1).reply_markup.inline_keyboard[0][0].callback_data;
   assert.match(continuation, /^continue:/);
   assert.equal((await bot.store.getJob(continuation.slice(9))).state.step, 1);
-  await bot.click(continuation, { chatId: -20, topicId: 7 });
+  await bot.click(continuation, { chatId: -1004418477887, topicId: 7 });
   await bot.click(continuation, { chatId: -10, topicId: 8 });
   assert.equal(bot.advances.length, 1);
   bot.restart();

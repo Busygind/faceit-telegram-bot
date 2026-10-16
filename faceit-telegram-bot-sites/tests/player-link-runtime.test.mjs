@@ -18,7 +18,7 @@ test('cloud personal FACEIT survives cold invocations, uses the caller binding a
   } };
   const calls = []; const profiles = [];
   const env = { BOT_TOKEN: `123456:${'synthetic_'.repeat(4)}`, FACEIT_API_KEY: 'synthetic-personal-faceit-key',
-    TS_ENCRYPTION_KEY: '12'.repeat(32), WEBHOOK_SECRET: 'synthetic_'.repeat(5), ALLOWED_CHAT_IDS: '[-10,-20]', DB };
+    TS_ENCRYPTION_KEY: '12'.repeat(32), WEBHOOK_SECRET: 'synthetic_'.repeat(5), ALLOWED_CHAT_IDS: '[-999]', DB };
   let update = 0;
   async function invoke(text, { userId = 1, chatId = -10, callback, messageFields = {} } = {}) {
     const id = ++update;
@@ -46,6 +46,7 @@ test('cloud personal FACEIT survives cold invocations, uses the caller binding a
       message: { ...message, from: { id: 999, is_bot: true } } } } : { update_id: id, message };
     await runtime(payload);
   }
+  // Neither chat is listed by the legacy setting: it must not gate registration.
   await invoke('/setfaceit Alpha');
   await invoke('/setfaceit Beta', { userId: 2 });
   assert.equal(profiles.length, 2); // One profile request per setting, no history/details.

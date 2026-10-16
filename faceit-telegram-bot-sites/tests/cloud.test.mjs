@@ -6,7 +6,7 @@ import { CLOUD_HANDLER_MS, createWebhook, createCloudRuntime, health, readConfig
 import { SQL_SCHEMA, Store } from '../bot/core/store.js';
 import { REPORT_CACHE_SCHEMA } from '../bot/report-cache.mjs';
 const CHAT=-1004393474895;
-const configuration={BOT_TOKEN:`123456:${'fixture_'.repeat(4)}`,FACEIT_API_KEY:'fixture-faceit-key-123456',TS_ENCRYPTION_KEY:'12'.repeat(32),WEBHOOK_SECRET:'fixture_'.repeat(6),ALLOWED_CHAT_IDS:JSON.stringify([CHAT])};
+const configuration={BOT_TOKEN:`123456:${'fixture_'.repeat(4)}`,FACEIT_API_KEY:'fixture-faceit-key-123456',TS_ENCRYPTION_KEY:'12'.repeat(32),WEBHOOK_SECRET:'fixture_'.repeat(6)};
 function database(t){
  const sql=new DatabaseSync(':memory:');t.after(()=>sql.close());for(const statement of [...SQL_SCHEMA,...REPORT_CACHE_SCHEMA])sql.exec(statement);
  const binding={prepare(query){const stmt=sql.prepare(query);const bound=(values=[])=>({bind(...next){return bound(next);},async run(){const result=stmt.run(...values);return{meta:{changes:Number(result.changes),last_row_id:Number(result.lastInsertRowid)}};},async first(){return stmt.get(...values)??null;},async all(){return{results:stmt.all(...values)};}});return bound();}};
@@ -20,8 +20,28 @@ test('D1 adapter runs the shared Store with bound values and persisted lease/che
  await assert.rejects(adapter.get('SELECT :missing',{}),/CLOUD_DATABASE_BINDING/);
 });
 test('configuration and health expose no secrets',async()=>{
- assert.deepEqual(readConfiguration(configuration).chatIds,[CHAT]);for(const key of ['BOT_TOKEN','FACEIT_API_KEY','TS_ENCRYPTION_KEY','WEBHOOK_SECRET'])assert.throws(()=>readConfiguration({...configuration,[key]:''}),/CLOUD_CONFIGURATION/);
+ assert.deepEqual(readConfiguration(configuration),{});for(const key of ['BOT_TOKEN','FACEIT_API_KEY','TS_ENCRYPTION_KEY','WEBHOOK_SECRET'])assert.throws(()=>readConfiguration({...configuration,[key]:''}),/CLOUD_CONFIGURATION/);
  const body=JSON.stringify(await health({...configuration,DB:{}}).json());assert.ok(!body.includes(configuration.BOT_TOKEN));assert.equal(JSON.parse(body).configured,true);assert.equal((await health({}).json()).configured,false);
+});
+test('legacy ALLOWED_CHAT_IDS is ignored rather than parsed or enforced',()=>{
+ for(const legacy of ['[]','[-42]','invalid-json','[0,1]','null']) assert.deepEqual(readConfiguration({...configuration,ALLOWED_CHAT_IDS:legacy}),{});
+});
+test('cloud runtime accepts an unknown basic group or supergroup despite legacy allowlist',async t=>{
+ const {sql,binding}=database(t);const messages=[];
+ const runtime=createCloudRuntime({...configuration,ALLOWED_CHAT_IDS:'[-42]',DB:binding},{
+  fetch:async(url,options)=>{
+   const method=new URL(url).pathname.split('/').at(-1);const params=JSON.parse(options.body);
+   if(method==='getChatMember')return Response.json({ok:true,result:{status:'member'}});
+   assert.ok(['setMyCommands','sendMessage'].includes(method));if(method==='sendMessage')messages.push(params);
+   return Response.json({ok:true,result:method==='setMyCommands'?true:{message_id:10}});
+  },onMetrics:()=>{},onCacheEvent:()=>{},onDiagnostic:()=>{},
+ });
+ for(const [index,type] of ['group','supergroup'].entries()){
+  const id=index===0?-12345:-1004418477887;
+  await runtime({update_id:2000+index,message:{message_id:2000+index,chat:{id,type},from:{id:9,is_bot:false},text:'/menu'}});
+  assert.equal(messages.at(-1).chat_id,id);
+ }
+ assert.equal(messages.length,2);assert.equal(sql.prepare('SELECT COUNT(*) AS n FROM deliveries').get().n,2);
 });
 test('webhook rejects unauthenticated and malformed requests before processing',async()=>{
  let handled=0;const handle=createWebhook({getEnv:()=>({...configuration,DB:{}}),getRuntime:()=>async()=>{handled++;}});

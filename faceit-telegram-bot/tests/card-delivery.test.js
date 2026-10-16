@@ -141,8 +141,8 @@ test('FACEIT membership and private-chat errors are image-only without bypassing
   await bot.send('/last Nick', { chatType: 'private' });
   assert.equal(bot.sent('sendPhoto').length, 2);
   assert.match(bot.renderedReports[1].message, /только в группе/);
-  await bot.send('/stats Nick', { chatId: -999 });
-  await bot.click('continue:unknown', { chatId: -999 });
+  await bot.send('/stats Nick', { chatId: 999 });
+  await bot.click('continue:unknown', { chatId: 999 });
   assert.equal(bot.sent('sendPhoto').length, 2);
   assert.equal(bot.starts.length, 0);
   imageOnly(bot);

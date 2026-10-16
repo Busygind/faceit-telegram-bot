@@ -69,10 +69,8 @@ export class Store {
     return (await this.db.get('SELECT * FROM chat_settings WHERE chat_id = :id', { ':id': chatId })) ?? null;
   }
 
-  async allowed(chatId, allowedChatIds) {
-    const row = await this.getSettings(chatId);
-    if (row && allowedChatIds.includes(row.origin_chat_id)) return true;
-    if (!allowedChatIds.includes(chatId)) return false;
+  async allowed(chatId) {
+    if (!Number.isSafeInteger(chatId) || chatId >= 0) return false;
     // An old basic-group ID is permanently retired after migration.
     return !(await this.db.get('SELECT chat_id FROM chat_settings WHERE origin_chat_id = :id AND chat_id != :id', { ':id': chatId }));
   }
@@ -90,9 +88,8 @@ export class Store {
     if (result.rowsAffected !== 1) throw new Error('SETTINGS_CONFLICT');
   }
 
-  async migrateChat(oldId, newId, allowedChatIds, sealer) {
-    if (oldId === newId || !Number.isSafeInteger(newId) || newId >= 0) return false;
-    if (!(await this.allowed(oldId, allowedChatIds))) return false;
+  async migrateChat(oldId, newId, sealer) {
+    if (oldId === newId || !(await this.allowed(oldId)) || !(await this.allowed(newId))) return false;
     await this.db.run(`INSERT INTO chat_settings(chat_id,origin_chat_id,version,updated_at)
       VALUES(:old,:old,0,:now) ON CONFLICT(chat_id) DO NOTHING`, { ':old': oldId, ':now': this.now() });
     const old = await this.getSettings(oldId);

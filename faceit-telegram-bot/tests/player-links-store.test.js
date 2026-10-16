@@ -87,9 +87,9 @@ test('group migration does not copy personal links to a different chat id or ove
   await store.savePlayerLink(-10, 2, profile('OldTwo'));
   await store.savePlayerLink(-100001, 1, profile('Destination'));
   const crypt = createSealer({ keyHex: '11'.repeat(32), keyId: 'testing' });
-  assert.equal(await store.migrateChat(-10, -100001, [-10], crypt), true);
-  assert.equal(await store.allowed(-10, [-10]), false);
-  assert.equal(await store.allowed(-100001, [-10]), true);
+  assert.equal(await store.migrateChat(-10, -100001, crypt), true);
+  assert.equal(await store.allowed(-10), false);
+  assert.equal(await store.allowed(-100001), true);
   assert.equal((await store.getPlayerLink(-100001, 1)).nickname, 'Destination');
   assert.equal(await store.getPlayerLink(-100001, 2), null);
   // The retired chat remains inaccessible through the bot; no unrequested alias or fallback is introduced.

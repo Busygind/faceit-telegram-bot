@@ -16,7 +16,7 @@ globalThis.__faceitTestSchema = {
   integer: column('INTEGER'), text: column('TEXT'), index: () => ({ on: () => ({}) }), uniqueIndex: () => ({ on: () => ({}) }),
 };
 const fakeSettings = {
-  allowedChatIds: [-100], faceitKey: 'synthetic-local-faceit-test-key',
+  faceitKey: 'synthetic-local-faceit-test-key',
   encryptionKeyHex: '42'.repeat(32), encryptionKeyId: 'tests', maxRequests: 8,
 };
 registerHooks({

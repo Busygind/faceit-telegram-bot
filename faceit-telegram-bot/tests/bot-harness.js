@@ -52,7 +52,7 @@ export async function makeHarness(t, options = {}) {
   const dependencies = {
     api, store, faceit, now: options.now ?? (() => 1800000000),
     sealer: createSealer({ keyHex: '12'.repeat(32), keyId: 'fixture-key' }),
-    settings: { allowedChatIds: [-10, -20, -30], maxRequests: 8, ...options.settings },
+    settings: { maxRequests: 8, ...options.settings },
     renderCard: report => {
       renderedReports.push(structuredClone(report));
       return options.renderCard ? options.renderCard(report) : Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);

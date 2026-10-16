@@ -62,7 +62,7 @@ test('local credentials read only protected files, trim input and deduplicate ne
   assert.equal(credentials.faceitKey, FACEIT);
   assert.deepEqual(credentials.chatIds, [CHAT, -42]);
   const explicit = await loadCredentials({ root: f.root, telegramTokenFile: f.tokenFile, faceitKeyFile: f.faceitFile });
-  assert.deepEqual(explicit.chatIds, [CHAT]);
+  assert.deepEqual(explicit.chatIds, []);
 });
 
 test('local credential files reject insecure modes, links and missing files without revealing contents', async (t) => {
@@ -87,9 +87,9 @@ test('local credential files reject insecure modes, links and missing files with
   });
 });
 
-test('local credential formats and chat allowlist fail closed', async (t) => {
+test('local credential formats and optional diagnostic chat IDs fail closed', async (t) => {
   const f = await fixture(t);
-  for (const chatIds of [[], [1], [0], ['-42'], [-1.2], [Number.MIN_SAFE_INTEGER - 1], null]) {
+  for (const chatIds of [[1], [0], ['-42'], [-1.2], [Number.MIN_SAFE_INTEGER - 1], null]) {
     await assert.rejects(loadCredentials({ root: f.root, chatIds }), /LOCAL_CHAT_IDS/);
   }
   await writeFile(f.tokenFile, 'not-a-bot-token');
@@ -204,21 +204,21 @@ test('local parser accepts explicit paths and rejects missing values, unknown fl
   assert.deepEqual(parsed.chatIds, [CHAT]);
   assert.equal(parsed.telegramTokenFile, '/tmp/token');
   assert.equal(parsed.faceitKeyFile, '/tmp/faceit');
-  assert.deepEqual(parseOptions([], '/tmp/root').chatIds, [CHAT]);
+  assert.deepEqual(parseOptions([], '/tmp/root').chatIds, []);
   for (const args of [
     ['--unknown'], ['--chat-id'], ['--telegram-token-file'], ['--faceit-key-file'],
-    ['--chat-id', '--check'], ['--telegram-token-file', '--check'], ['--faceit-key-file', '--check'],
+    ['--chat-id', `${CHAT}`], ['--chat-id', '--check'], ['--telegram-token-file', '--check'], ['--faceit-key-file', '--check'],
   ]) assert.throws(() => parseOptions(args), /LOCAL_ARGUMENTS/);
 });
 
-test('local --check preflight is read-only and only returns safe bot/chat/permission status', async (t) => {
+test('default local --check discovers no chats and reports unknown deletion permission', async (t) => {
   const f = await fixture(t);
   const h = fakeTelegram();
   const statuses = [];
   const before = await readdir(f.secrets);
   const summary = await runLocal({ root: f.root, checkOnly: true }, { fetch: h.fetch, onStatus: (status) => statuses.push(status) });
-  assert.deepEqual(summary, { username: 'road_to_3_elo_bot', chatIds: [CHAT], canDeleteMessages: true });
-  assert.deepEqual(h.calls.map(({ method }) => method), ['getMe', 'getWebhookInfo', 'getChat', 'getChatMember']);
+  assert.deepEqual(summary, { username: 'road_to_3_elo_bot', chatIds: [], canDeleteMessages: null });
+  assert.deepEqual(h.calls.map(({ method }) => method), ['getMe', 'getWebhookInfo']);
   assert.deepEqual(await readdir(f.secrets), before);
   await assert.rejects(lstat(join(f.root, '.local-data')), { code: 'ENOENT' });
   assert.ok(!JSON.stringify(statuses).includes(TOKEN));
@@ -237,7 +237,7 @@ test('preflight mismatched bot, active webhook, wrong chat and missing admin fai
     [{ getChatMember: () => ({ status: 'member' }) }, 'LOCAL_BOT_NOT_ADMIN'],
   ]) {
     const h = fakeTelegram({ override });
-    await assert.rejects(runLocal({ root: f.root, checkOnly: false }, { fetch: h.fetch }), (error) => {
+    await assert.rejects(runLocal({ root: f.root, chatIds: [CHAT], checkOnly: true }, { fetch: h.fetch }), (error) => {
       assert.equal(error.message, code);
       assert.ok(!String(error.stack).includes(TOKEN));
       return true;
@@ -250,7 +250,7 @@ test('preflight mismatched bot, active webhook, wrong chat and missing admin fai
 test('preflight permits operation without deletion permission but reports its absence', async (t) => {
   const f = await fixture(t);
   const h = fakeTelegram({ override: { getChatMember: () => ({ status: 'administrator', can_delete_messages: false }) } });
-  const summary = await runLocal({ root: f.root, checkOnly: true }, { fetch: h.fetch });
+  const summary = await runLocal({ root: f.root, chatIds: [CHAT], checkOnly: true }, { fetch: h.fetch });
   assert.equal(summary.canDeleteMessages, false);
 });
 
@@ -267,10 +267,11 @@ test('safe startup errors and malformed CLI input never print raw exceptions or 
   assert.ok(!result.stderr.includes(TOKEN));
 });
 
-test('local fake Telegram menu flow uses shared bot, SQLite dedup and persistent offset, then closes cleanly', async (t) => {
+test('local polling works in a previously unknown chat without enumeration and retains SQLite dedup', async (t) => {
   const f = await fixture(t);
   const controller = new AbortController();
-  const update = { update_id: 77, message: { message_id: 20, text: '/menu', chat: { id: CHAT, type: 'supergroup' }, from: { id: 123, is_bot: false } } };
+  const newChat = -1004418477887;
+  const update = { update_id: 77, message: { message_id: 20, text: '/menu', chat: { id: newChat, type: 'supergroup' }, from: { id: 123, is_bot: false } } };
   const h = fakeTelegram({ batches: [[update]], stop: () => controller.abort() });
   const statuses = [];
   await runLocal({ root: f.root, checkOnly: false }, { fetch: h.fetch, signal: controller.signal, onStatus: (status) => statuses.push(status) });
@@ -280,17 +281,29 @@ test('local fake Telegram menu flow uses shared bot, SQLite dedup and persistent
   assert.equal(polls[1].params.offset, 78);
   const sent = h.calls.filter(({ method }) => method === 'sendMessage');
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].params.chat_id, CHAT);
+  assert.equal(sent[0].params.chat_id, newChat);
+  assert.equal(h.calls.filter(({ method }) => method === 'getChat').length, 0);
+  assert.equal(h.calls.filter(({ method }) => method === 'getChatMember').length, 1); // Runtime caller membership only.
   assert.ok(sent[0].params.reply_markup.inline_keyboard.length > 0);
   assert.equal(h.calls.filter(({ method }) => method === 'setMyCommands').length, 1);
   await assert.rejects(lstat(join(f.root, '.local-data/polling.lock')), { code: 'ENOENT' });
   const database = await openDatabase(join(f.root, '.local-data/bot.sqlite'));
   try {
     assert.equal(await database.getOffset(), 78);
-    assert.equal((await database.db.get('SELECT * FROM deliveries WHERE request_id=:id', { ':id': 'u:77' })).chat_id, CHAT);
+    assert.equal((await database.db.get('SELECT * FROM deliveries WHERE request_id=:id', { ':id': 'u:77' })).chat_id, newChat);
     assert.equal((await database.db.all('SELECT * FROM chat_settings')).length, 0);
   } finally { database.close(); }
   assert.equal(statuses.at(-1).code, 'POLLING_STOPPED');
   assert.ok(!JSON.stringify(statuses).includes(TOKEN));
   assert.ok(!JSON.stringify(statuses).includes(FACEIT));
+});
+
+test('explicit --check diagnostics retain strict per-chat identity, admin and deletion checks', async (t) => {
+  const f = await fixture(t); const h = fakeTelegram();
+  const summary = await runLocal({ root: f.root, chatIds: [CHAT, -42, CHAT], checkOnly: true }, { fetch: h.fetch });
+  assert.deepEqual(summary, { username: 'road_to_3_elo_bot', chatIds: [CHAT, -42], canDeleteMessages: true });
+  assert.deepEqual(h.calls.map(({ method }) => method), ['getMe', 'getWebhookInfo', 'getChat', 'getChatMember', 'getChat', 'getChatMember']);
+  const noDiagnosticsWhileRunning = fakeTelegram();
+  await assert.rejects(runLocal({ root: f.root, chatIds: [CHAT], checkOnly: false }, { fetch: noDiagnosticsWhileRunning.fetch }), /LOCAL_ARGUMENTS/);
+  assert.deepEqual(noDiagnosticsWhileRunning.calls, []);
 });

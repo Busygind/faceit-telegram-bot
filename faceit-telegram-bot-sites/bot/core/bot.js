@@ -57,7 +57,7 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
   const say = (ctx, text, keyboard = MENU) => api.sendMessage({ ...destination(ctx), text, ...(keyboard ? { reply_markup: keyboard } : {}) });
 
   async function access(ctx, user, admin = false) {
-    if (!user || user.is_bot || !(await store.allowed(ctx.chatId, settings.allowedChatIds))) return false;
+    if (!user || user.is_bot || !(await store.allowed(ctx.chatId))) return false;
     try {
       const member = await api.getChatMember({ chat_id: ctx.chatId, user_id: user.id });
       return admin ? ['creator', 'administrator'].includes(member.status)
@@ -321,10 +321,15 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
       || rawContext?.update?.edited_channel_post) return;
     const ctx = context(message);
     // Telegram-generated migration service messages, not user-supplied arguments.
-    if (message.migrate_to_chat_id || message.migrate_from_chat_id) {
-      const oldId = message.migrate_from_chat_id ?? ctx.chatId;
-      const newId = message.migrate_to_chat_id ?? ctx.chatId;
-      if (await claim(updateId, ctx, 'migration')) await store.migrateChat(oldId, newId, settings.allowedChatIds, sealer);
+    if (message.migrate_to_chat_id != null || message.migrate_from_chat_id != null) {
+      const movingTo = Number.isSafeInteger(message.migrate_to_chat_id) && message.chat.type === 'group'
+        && message.migrate_from_chat_id == null;
+      const movingFrom = Number.isSafeInteger(message.migrate_from_chat_id) && message.chat.type === 'supergroup'
+        && message.migrate_to_chat_id == null;
+      if (!movingTo && !movingFrom) return;
+      const oldId = movingFrom ? message.migrate_from_chat_id : ctx.chatId;
+      const newId = movingTo ? message.migrate_to_chat_id : ctx.chatId;
+      if (await claim(updateId, ctx, 'migration')) await store.migrateChat(oldId, newId, sealer);
       return;
     }
     const cmd = command(message.text);
@@ -333,15 +338,12 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
     const faceitCommand = cmd.name === 'last' || cmd.name === 'stats';
     if (!['group', 'supergroup'].includes(message.chat.type)) {
       if (faceitCommand) {
-        if (await claim(updateId, ctx, cmd.name)) return notice(ctx, `u:${updateId}`, 'Нужна группа', 'Добавьте меня в разрешённую группу и отправьте /menu. FACEIT команды доступны только в группе.');
+        if (await claim(updateId, ctx, cmd.name)) return notice(ctx, `u:${updateId}`, 'Нужна группа', 'Добавьте меня в группу и отправьте /menu. FACEIT команды доступны только в группе.');
         return;
       }
-      return say(ctx, 'Добавьте меня в группу и отправьте /menu. TeamSpeak, опросы и FACEIT команды доступны только в разрешённой группе.');
+      return say(ctx, 'Добавьте меня в группу и отправьте /menu. TeamSpeak, опросы и FACEIT команды доступны только в группе.');
     }
-    if (!(await store.allowed(ctx.chatId, settings.allowedChatIds))) {
-      if (cmd.name === 'setup' || cmd.name === 'start' || cmd.name === 'menu') return say(ctx, `Этот чат ещё не разрешён. Его ID: ${ctx.chatId}. Владелец бота должен добавить ID в конфигурацию и развернуть её. Пароли и ключи сюда не отправляйте.`, null);
-      return;
-    }
+    if (!(await store.allowed(ctx.chatId))) return;
     if (!(await access(ctx, message.from))) {
       if (faceitCommand) {
         if (await claim(updateId, ctx, cmd.name)) return notice(ctx, `u:${updateId}`, 'Нет доступа', 'Не могу подтвердить членство. Выдайте боту права администратора; команды должен отправлять участник от своего аккаунта.');
@@ -367,8 +369,8 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
     const updateId = rawContext?.update?.update_id;
     const faceitCallback = query.data?.startsWith('continue:') || ['last', 'stats', 'hint:last', 'hint:stats'].includes(query.data);
     if (!(await access(ctx, query.from))) {
-      if (faceitCallback && await store.allowed(ctx.chatId, settings.allowedChatIds) && await claim(updateId, ctx, 'callback')) {
-        return notice(ctx, `u:${updateId}`, 'Нет доступа', 'Не могу подтвердить членство. Команду должен отправить участник разрешённой группы.');
+      if (faceitCallback && await store.allowed(ctx.chatId) && await claim(updateId, ctx, 'callback')) {
+        return notice(ctx, `u:${updateId}`, 'Нет доступа', 'Не могу подтвердить членство. Команду должен отправить участник этой группы.');
       }
       return;
     }

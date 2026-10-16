@@ -29,10 +29,7 @@ export function readConfiguration(env) {
       || typeof env.FACEIT_API_KEY !== 'string' || env.FACEIT_API_KEY.length < 16 || /\s/.test(env.FACEIT_API_KEY)
       || !/^[a-f0-9]{64}$/i.test(env.TS_ENCRYPTION_KEY ?? '')
       || !/^[A-Za-z0-9_-]{32,128}$/.test(env.WEBHOOK_SECRET ?? '')) throw new Error('CLOUD_CONFIGURATION');
-  let chatIds;
-  try { chatIds = JSON.parse(env.ALLOWED_CHAT_IDS ?? '[-1004393474895]'); } catch { throw new Error('CLOUD_CONFIGURATION'); }
-  if (!Array.isArray(chatIds) || !chatIds.length || !chatIds.every(id => Number.isSafeInteger(id) && id < 0)) throw new Error('CLOUD_CONFIGURATION');
-  return { chatIds: [...new Set(chatIds)] };
+  return {};
 }
 
 export function health(env) {
@@ -81,7 +78,7 @@ export function createCloudRuntime(env, {
     ...(Number.isFinite(value.ageSeconds) ? { ageSeconds: value.ageSeconds } : {}) })),
   setTimer = (callback, milliseconds) => setTimeout(callback, milliseconds), clearTimer = timer => clearTimeout(timer),
 } = {}) {
-  const configuration = readConfiguration(env);
+  readConfiguration(env);
   const cachedFetch = faceitCache(fetch);
   return async (update, { startedAt = now() } = {}) => {
     // The absolute egress deadline belongs to this invocation, never a cached
@@ -142,7 +139,7 @@ export function createCloudRuntime(env, {
       const bot = createBot({
         api, store: new Store(database, epochNow), now: epochNow, shouldContinue,
         reportCache: createReportCache({ db: database, botToken: env.BOT_TOKEN, faceitKey: env.FACEIT_API_KEY, now: epochNow, onEvent: onCacheEvent }),
-        settings: { allowedChatIds: configuration.chatIds, maxRequests: 8, autoAdvanceBatches: 32, autoAdvanceSeconds: CLOUD_WORK_MS / 1000 },
+        settings: { maxRequests: 8, autoAdvanceBatches: 32, autoAdvanceSeconds: CLOUD_WORK_MS / 1000 },
         sealer: createSealer({ keyHex: env.TS_ENCRYPTION_KEY, keyId: 'cloud-v1' }),
         faceit: createFaceitService({ fetch: networkFetch, key: env.FACEIT_API_KEY, now: epochNow }),
         renderCard: report => { metrics.renderCount++; return compressPng(renderReportCard(report)); }, inputFile: createInputFile,

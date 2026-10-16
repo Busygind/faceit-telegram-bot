@@ -131,13 +131,13 @@ test('replacement and deletion are self-only, chat-scoped and idempotent per upd
   assert.equal((await binding(bot)).nickname, 'SavedAfterDeletion');
 });
 
-test('setting rejects mentions, extra arguments, nonmembers, bots, private/forbidden chats, forwarded and anonymous messages', async t => {
+test('setting rejects mentions, extra arguments, nonmembers, bots, private chats/invalid group ids, forwarded and anonymous messages', async t => {
   const bot = await makeHarness(t);
   await bot.send('/setfaceit Mine');
   const original = await binding(bot);
   for (const command of ['/setfaceit @Other', '/setfaceit Other @someone', '/setfaceit Other\nExtra', '/setfaceit ' + 'X'.repeat(65)]) await bot.send(command);
   for (const configuration of [
-    { userId: 3 }, { chatId: -999 }, { chatType: 'private' },
+    { userId: 3 }, { chatId: 999 }, { chatType: 'private' },
     { messageFields: { from: { id: 1, is_bot: true } } },
     { messageFields: { sender_chat: { id: -10 } } },
     { messageFields: { forward_origin: { type: 'user' } } },

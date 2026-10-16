@@ -10,8 +10,8 @@ export async function secureDirectory(path) {
   if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077)) throw new Error('LOCAL_DIRECTORY_UNSAFE');
 }
 
-export async function loadCredentials({ root, telegramTokenFile, faceitKeyFile, chatIds = [-1004393474895] }) {
-  if (!Array.isArray(chatIds) || !chatIds.length || !chatIds.every((id) => Number.isSafeInteger(id) && id < 0)) {
+export async function loadCredentials({ root, telegramTokenFile, faceitKeyFile, chatIds = [] }) {
+  if (!Array.isArray(chatIds) || !chatIds.every((id) => Number.isSafeInteger(id) && id < 0)) {
     throw new Error('LOCAL_CHAT_IDS');
   }
   let token, faceitKey;

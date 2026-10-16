@@ -8,7 +8,6 @@ const root = resolve(import.meta.dirname, '..');
 try {
   const secrets = JSON.parse(await readProtected(resolve(root, '.secrets/runtime.json')));
   validateSettings(secrets);
-  if (!secrets.allowedChatIds.length) console.log('Bootstrap mode: all group actions disabled; /setup can show the current chat ID.');
   const generated = await readProtected(resolve(root, 'tgcloud/lib/private-settings.js'));
   if (!generated.includes(`export default ${JSON.stringify(secrets)};`)) throw new Error('Out-of-sync configuration');
   const check = spawnSync(process.execPath, ['scripts/check.mjs'], { cwd: root, stdio: 'inherit' });
