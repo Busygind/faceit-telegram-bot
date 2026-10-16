@@ -153,3 +153,69 @@ test('webhook resolves a fresh runtime even when the environment object is reuse
  assert.equal((await handle(request({update_id:817}))).status,200);
  assert.equal(created,2);
 });
+
+function coldStatsWithClock(t, { initialDelay = 0, readMs = 450, rateLimit = false } = {}) {
+ const {sql,binding}=database(t);const base=1800000000000;let clock=base+initialDelay;
+ // Keep legacy implicit clocks under test too: the former 25-second setting
+ // must reproduce the real pause instead of passing under instant mock I/O.
+ const originalDateNow=Date.now;Date.now=()=>clock;t.after(()=>{Date.now=originalDateNow;});
+ const calls=[];const metrics=[];const methods=[];const timer=fakeTimer();
+ const prepare=binding.prepare.bind(binding);
+ binding.prepare=query=>{
+  const original=prepare(query);
+  const wrap=statement=>Object.fromEntries(Object.entries(statement).map(([name,fn])=>[name,name==='bind'? (...args)=>wrap(fn(...args)) : async(...args)=>{const result=await fn(...args);clock+=120;return result;}]));
+  return wrap(original);
+ };
+ const item=i=>({match_id:`slow-${i}`,game_id:'cs2',game:'cs2',status:'FINISHED',finished_at:base/1000-1000-i*86400,best_of:1,
+  teams:{faction1:{faction_id:'a',name:'Own',roster:[{player_id:'p',nickname:'Player'}]},faction2:{faction_id:'b',name:'Other',roster:[{player_id:'q',nickname:'Other'}]}},results:{winner:'faction1',score:{faction1:1,faction2:0}}});
+ const matches=Array.from({length:30},(_,i)=>item(i));
+ const fetch=async(url,options)=>{
+  const target=new URL(url);const started=clock;
+  if(target.origin==='https://api.telegram.org'){
+   const method=target.pathname.split('/').at(-1);methods.push({method,started});clock+=250;
+   if(method==='getMe')return Response.json({ok:true,result:{id:999,username:'road_to_3_elo_bot'}});
+   if(method==='getChatMember')return Response.json({ok:true,result:{status:'member'}});
+   assert.equal(method,'sendPhoto');assert.ok(options.body instanceof FormData);assert.equal(options.body.get('caption'),null);
+   return Response.json({ok:true,result:{message_id:99}});
+  }
+  assert.equal(target.origin,'https://open.faceit.com');calls.push({path:target.pathname,started});clock+=readMs;
+  if(target.pathname.endsWith('/players'))return Response.json({player_id:'p',nickname:'Player',games:{cs2:{faceit_elo:1710,skill_level:8}}});
+  if(target.pathname.endsWith('/history'))return Response.json({items:matches});
+  const match=matches.find(m=>target.pathname.includes(`/matches/${m.match_id}`));assert.ok(match);
+  if(!target.pathname.endsWith('/stats'))return Response.json(match);
+  if(rateLimit)return Response.json({}, {status:429,headers:{'retry-after':'120'}});
+  return Response.json({rounds:[{match_id:match.match_id,game_id:'cs2',match_round:1,round_stats:{Map:'de_inferno',Rounds:'21',Winner:'a'},teams:[
+   {team_id:'a',team_stats:{'Final Score':'13'},players:[{player_id:'p',nickname:'Player',player_stats:{Kills:'20',Deaths:'11',Assists:'5',Headshots:'5','Total Damage':'2100'}}]},
+   {team_id:'b',team_stats:{'Final Score':'8'},players:[{player_id:'q',nickname:'Other',player_stats:{Kills:'11',Deaths:'20',Assists:'1'}}]},
+  ]}]});
+ };
+ const runtime=createCloudRuntime({...configuration,DB:binding},{...timer,now:()=>clock,fetch,onDiagnostic:()=>{},onMetrics:value=>metrics.push(value),onCacheEvent:()=>{}});
+ return {sql,calls,methods,metrics,base,clock:()=>clock,run:()=>runtime({update_id:950,message:{message_id:950,chat:{id:CHAT,type:'supergroup'},from:{id:123,is_bot:false},text:'/stats Player'}},{startedAt:base})};
+}
+
+test('ordinary cold 30-match report crossing 25 seconds completes in one update with fewer D1 checkpoints',async t=>{
+ const h=coldStatsWithClock(t);await h.run();
+ const row=h.sql.prepare('SELECT status,state FROM report_jobs').get();assert.equal(row.status,'ready');assert.equal(JSON.parse(row.state).matches.length,30);
+ assert.equal(h.calls.length,62);assert.ok(h.metrics[0].elapsedMs>25000);assert.ok(h.metrics[0].elapsedMs<65000);
+ assert.ok(h.metrics[0].databaseCalls<50);assert.deepEqual(h.methods.filter(x=>x.method==='sendPhoto').length,1);
+ assert.equal(h.sql.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE kind='notice'").get().n,0);
+ assert.equal(h.sql.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE kind='photo' AND status='sent'").get().n,1);
+});
+
+test('work budget includes initial webhook delay and stops new FACEIT reads before the 90-second delivery deadline',async t=>{
+ const h=coldStatsWithClock(t,{initialDelay:50000,readMs:1500});await h.run();
+ assert.ok(h.calls.length>2 && h.calls.length<62);
+ assert.ok(h.calls.every(c=>c.started<h.base+65000));
+ const row=h.sql.prepare('SELECT status,state FROM report_jobs').get();assert.equal(row.status,'pending');assert.ok(JSON.parse(row.state).matches.length<30);
+ const photo=h.methods.find(x=>x.method==='sendPhoto');assert.ok(photo);assert.ok(photo.started<h.base+CLOUD_HANDLER_MS);
+ assert.ok(h.clock()<h.base+CLOUD_HANDLER_MS);
+ assert.equal(h.sql.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE kind='notice' AND status='sent'").get().n,1);
+});
+
+test('expanded cloud budget still checkpoints and pauses immediately for FACEIT Retry-After',async t=>{
+ const h=coldStatsWithClock(t,{rateLimit:true});await h.run();
+ const row=h.sql.prepare('SELECT status,state FROM report_jobs').get();const state=JSON.parse(row.state);
+ assert.equal(row.status,'pending');assert.equal(h.calls.filter(c=>c.path.endsWith('/stats')).length,1);
+ assert.ok(state.retryAt>Math.floor(h.clock()/1000));assert.equal(state.phase,'stats');
+ assert.equal(h.sql.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE kind='notice' AND status='sent'").get().n,1);
+});

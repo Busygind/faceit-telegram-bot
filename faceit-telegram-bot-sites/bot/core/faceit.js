@@ -339,7 +339,7 @@ export function createFaceitService({ fetch, key, now = () => Math.floor(Date.no
     };
   }
 
-  async function advance(checkpoint, { maxRequests = 8, historyOnly = false } = {}) {
+  async function advance(checkpoint, { maxRequests = 8, historyOnly = false, shouldContinue } = {}) {
     if (!checkpoint || checkpoint.version !== 1 || !['last', 'stats'].includes(checkpoint.kind)) {
       throw new FaceitError('INVALID_CHECKPOINT');
     }
@@ -354,7 +354,11 @@ export function createFaceitService({ fetch, key, now = () => Math.floor(Date.no
     if (state.blocked || (state.retryAt && state.retryAt > now())) return { done: false, state, report: null, progress: progress(state) };
     state.retryAt = null;
     let used = 0;
+    const paused = Symbol('request-budget-exhausted');
     const request = async (path, query) => {
+      // Stop only between GETs: a completed detail/stat response is first
+      // normalized into the checkpoint, without consuming a fake request.
+      if (typeof shouldContinue === 'function' && !shouldContinue()) throw paused;
       used += 1;
       state.requests += 1;
       return get(path, query, state.retryCount);
@@ -442,9 +446,11 @@ export function createFaceitService({ fetch, key, now = () => Math.floor(Date.no
         state.retryCount = 0;
       }
     } catch (error) {
-      if (!(error instanceof FaceitError) || !error.retryAt) throw error;
-      state.retryAt = error.retryAt;
-      state.retryCount += 1;
+      if (error !== paused) {
+        if (!(error instanceof FaceitError) || !error.retryAt) throw error;
+        state.retryAt = error.retryAt;
+        state.retryCount += 1;
+      }
     }
     if (state.phase === 'done') state.completedAt ??= now();
     return {

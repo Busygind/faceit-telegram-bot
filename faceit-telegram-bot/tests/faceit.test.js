@@ -392,3 +392,58 @@ test('a percentage alone never becomes a headshot count or a synthetic HS ratio'
   assert.equal(report.metrics.hs.matches, 0);
   assert.equal(report.metrics.hs.maps, 0);
 });
+
+test('invocation guard pauses before a GET without consuming requests or altering the input checkpoint', async () => {
+  const { service, calls } = fixture([history()]);
+  const initial = await service.start('PlayerOne', 'last');
+  const frozen = structuredClone(initial);
+  const result = await service.advance(initial, { maxRequests: 8, shouldContinue: () => false });
+  assert.equal(result.done, false);
+  assert.deepEqual(result.state, initial);
+  assert.deepEqual(initial, frozen);
+  assert.equal(result.progress.requests, 1);
+  assert.equal(result.progress.retryAt, null);
+  assert.equal(calls.length, 1);
+  const resumed = await complete(service, JSON.parse(JSON.stringify(result.state)));
+  assert.equal(resumed.report.match.matchId, 'match-1');
+  assert.equal(calls.length, 4);
+});
+
+test('invocation guard preserves a fetched detail and resumes at stats without repeating a GET', async () => {
+  let allowed = true;
+  const { service, calls } = fixture([history()], {
+    intercept: url => { if (url.pathname.endsWith('/matches/match-1')) allowed = false; },
+  });
+  const result = await service.advance(await service.start('PlayerOne', 'last'), { maxRequests: 20, shouldContinue: () => allowed });
+  assert.equal(result.done, false);
+  assert.equal(result.state.phase, 'stats');
+  assert.equal(result.state.detail.match_id, 'match-1');
+  assert.equal(result.progress.requests, 3);
+  assert.equal(result.progress.retryAt, null);
+  assert.equal(calls.length, 3);
+  allowed = true;
+  const resumed = await service.advance(JSON.parse(JSON.stringify(result.state)), { maxRequests: 20, shouldContinue: () => allowed });
+  assert.equal(resumed.done, true);
+  assert.equal(resumed.report.match.matchId, 'match-1');
+  assert.equal(calls.length, 4);
+  assert.equal(calls.filter(call => call.url.pathname.endsWith('/matches/match-1')).length, 1);
+  assert.equal(calls.filter(call => call.url.pathname.endsWith('/stats')).length, 1);
+  const ready = await service.advance(resumed.state, { shouldContinue: () => false });
+  assert.equal(ready.done, true, 'a ready checkpoint needs no HTTP and remains deliverable after the read budget');
+  assert.equal(calls.length, 4);
+});
+
+test('history-only selection settles after the last allowed GET without reading detail or stats', async () => {
+  let allowed = true;
+  const { service, calls } = fixture([history()], {
+    intercept: url => { if (url.pathname.endsWith('/history')) allowed = false; },
+  });
+  const result = await service.advance(await service.start('PlayerOne', 'last'), { maxRequests: 8, historyOnly: true, shouldContinue: () => allowed });
+  assert.equal(result.state.phase, 'details');
+  assert.equal(result.state.selected.length, 1);
+  assert.equal(result.state.windows.length, 0);
+  assert.equal(result.state.requests, 2);
+  assert.equal(calls.length, 2);
+  assert.equal(result.progress.retryAt, null);
+  assert.equal(JSON.stringify(result.state).includes('shouldContinue'), false);
+});

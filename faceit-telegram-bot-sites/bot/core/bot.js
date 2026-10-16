@@ -48,7 +48,10 @@ function safeError(error) {
   }
 }
 
-export function createBot({ api, store, faceit, sealer, settings, renderCard, inputFile, reportCache, now = () => Math.floor(Date.now() / 1000) }) {
+export function createBot({ api, store, faceit, sealer, settings, renderCard, inputFile, reportCache, shouldContinue, now = () => Math.floor(Date.now() / 1000) }) {
+  // Optional invocation-scoped budget. It is never serialized into a checkpoint.
+  const canContinue = () => typeof shouldContinue !== 'function' || shouldContinue();
+  const requestBudget = typeof shouldContinue === 'function' ? { shouldContinue } : {};
   let me;
   const getMe = async () => me ?? (me = await api.getMe());
   const say = (ctx, text, keyboard = MENU) => api.sendMessage({ ...destination(ctx), text, ...(keyboard ? { reply_markup: keyboard } : {}) });
@@ -183,7 +186,10 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
     const continuation = (state, progress) => {
       const retry = progress?.retryAt ?? state.retryAt;
       const waiting = retry && retry > now() ? ` FACEIT просит подождать ещё ${retry - now()} сек.` : '';
-      return notice(ctx, requestId, 'Сохранила прогресс', `${progress?.message ?? 'Загружаю историю и статистику'}.${waiting}\nНажмите «Продолжить». Повторять ник не нужно.`, continueKeyboard(jobId), state.profile?.nickname ?? state.nickname);
+      const timedOut = !canContinue() || now() >= deadline;
+      const reason = timedOut && !waiting ? 'Загрузка FACEIT не уложилась в безопасное время одного запроса' : progress?.message ?? 'Загружаю историю и статистику';
+      const loaded = state.selected?.length ? `Загружено ${state.matches?.length ?? 0} из ${state.selected.length} матчей.\n` : '';
+      return notice(ctx, requestId, 'Сохранила прогресс', `${reason}.${waiting}\n${loaded}Нажмите «Продолжить». Повторять ник не нужно.`, continueKeyboard(jobId), state.profile?.nickname ?? state.nickname);
     };
     let progress;
     for (let batch = 0; batch < batches; batch++) {
@@ -198,18 +204,18 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
           const report = { ...job.state.cachedReport, stale };
           return reportDelivery(ctx, jobId, report, job.state, { fileId: stale ? null : job.state.cachedFileId });
         }
-        const result = await faceit.advance(job.state, { maxRequests: settings.maxRequests });
+        const result = await faceit.advance(job.state, { maxRequests: settings.maxRequests, ...requestBudget });
         if (result.done) return reportDelivery(ctx, jobId, result.report, result.state);
         return notice(ctx, requestId, 'Запрос недоступен', 'Сохранённый отчёт повреждён. Отправьте /stats ник или /last ник заново.');
       }
-      if ((job.state.retryAt && job.state.retryAt > now()) || (batch > 0 && now() >= deadline)) {
+      if ((job.state.retryAt && job.state.retryAt > now()) || !canContinue() || (batch > 0 && now() >= deadline)) {
         return continuation(job.state, progress);
       }
       if (!(await store.leaseJob(jobId, job.version))) return notice(ctx, requestId, 'Запрос уже обрабатывается', 'Если выполнение прервалось, подождите две минуты и нажмите ещё раз.', continueKeyboard(jobId));
       let result;
       try {
         const historyOnly = Boolean(reportCache && !job.state.cacheChecked && job.state.phase === 'history');
-        result = await faceit.advance(job.state, { maxRequests: settings.maxRequests, ...(historyOnly ? { historyOnly: true } : {}) });
+        result = await faceit.advance(job.state, { maxRequests: settings.maxRequests, ...requestBudget, ...(historyOnly ? { historyOnly: true } : {}) });
       }
       catch (error) {
         await store.saveJob(jobId, job.version, job.state, 'pending');
@@ -229,7 +235,7 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
       if (result.done) return reportDelivery(ctx, jobId, result.report, result.state);
       progress = result.progress;
       const retry = progress?.retryAt ?? result.state.retryAt;
-      if (batch + 1 >= batches || now() >= deadline || (retry && retry > now())) return continuation(result.state, progress);
+      if (batch + 1 >= batches || now() >= deadline || !canContinue() || (retry && retry > now())) return continuation(result.state, progress);
     }
   }
 
@@ -298,7 +304,7 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
       let state = await faceit.start(nickname || link.nickname, name, ...(link ? [{ playerId: link.player_id }] : []));
       const jobId = `${(-ctx.chatId).toString(36)}_${updateId.toString(36)}`;
       if (reportCache) {
-        const history = await faceit.advance(state, { maxRequests: settings.maxRequests, historyOnly: true });
+        const history = await faceit.advance(state, { maxRequests: settings.maxRequests, ...requestBudget, historyOnly: true });
         state = history.state;
         const cached = await cachedReport(state);
         if (cached) return reportDelivery(ctx, jobId, cached.report, state, cached);

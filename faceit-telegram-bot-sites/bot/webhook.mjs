@@ -13,6 +13,7 @@ import { createD1Adapter, cloudFailureCode, logCloudDiagnostic } from './d1.mjs'
 
 export const SECRET_NAMES = ['BOT_TOKEN', 'FACEIT_API_KEY', 'TS_ENCRYPTION_KEY', 'WEBHOOK_SECRET'];
 export const CLOUD_HANDLER_MS = 90_000;
+export const CLOUD_WORK_MS = 65_000;
 const MAX_BODY = 65536;
 const faceitCaches = new WeakMap();
 function faceitCache(fetch) {
@@ -87,8 +88,11 @@ export function createCloudRuntime(env, {
     // runtime or another concurrently handled update. D1 waits cannot extend it.
     if (!Number.isFinite(startedAt)) throw new Error('CLOUD_HANDLER_DEADLINE');
     const deadline = startedAt + CLOUD_HANDLER_MS;
+    const workDeadline = startedAt + CLOUD_WORK_MS;
+    const epochNow = () => Math.floor(now() / 1000);
     const metrics = { faceitReads: 0, telegramRequests: 0, databaseCalls: 0, renderCount: 0, photoUploads: 0, photoFileReuses: 0 };
     const controller = new AbortController();
+    const shouldContinue = () => !controller.signal.aborted && now() < workDeadline;
     const assertActive = () => {
       if (controller.signal.aborted || now() >= deadline) {
         controller.abort();
@@ -136,11 +140,11 @@ export function createCloudRuntime(env, {
         metrics.databaseCalls++; return adapter[method](...args);
       }]));
       const bot = createBot({
-        api, store: new Store(database),
-        reportCache: createReportCache({ db: database, botToken: env.BOT_TOKEN, faceitKey: env.FACEIT_API_KEY, onEvent: onCacheEvent }),
-        settings: { allowedChatIds: configuration.chatIds, maxRequests: 4, autoAdvanceBatches: 32, autoAdvanceSeconds: 25 },
+        api, store: new Store(database, epochNow), now: epochNow, shouldContinue,
+        reportCache: createReportCache({ db: database, botToken: env.BOT_TOKEN, faceitKey: env.FACEIT_API_KEY, now: epochNow, onEvent: onCacheEvent }),
+        settings: { allowedChatIds: configuration.chatIds, maxRequests: 8, autoAdvanceBatches: 32, autoAdvanceSeconds: CLOUD_WORK_MS / 1000 },
         sealer: createSealer({ keyHex: env.TS_ENCRYPTION_KEY, keyId: 'cloud-v1' }),
-        faceit: createFaceitService({ fetch: networkFetch, key: env.FACEIT_API_KEY }),
+        faceit: createFaceitService({ fetch: networkFetch, key: env.FACEIT_API_KEY, now: epochNow }),
         renderCard: report => { metrics.renderCount++; return compressPng(renderReportCard(report)); }, inputFile: createInputFile,
       });
       if (update.message) await bot.handleMessage(update.message, { update });
