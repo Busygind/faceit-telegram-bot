@@ -172,3 +172,92 @@ test('ready callback after automatic completion cannot duplicate its only image'
   assert.equal(bot.advances.length, 11);
   assert.equal((await bot.db.get('SELECT * FROM report_jobs')).version, 10);
 });
+
+test('invocation guard stops before leasing and allows the same pending job to resume', async t => {
+  let allowed = false;
+  const bot = await makeHarness(t, { settings: AUTO, faceitOverrides: stepsUntilDone(3) });
+  bot.dependencies.shouldContinue = () => allowed;
+  bot.restart();
+  await bot.send('/stats Nick');
+  assert.equal(bot.advances.length, 0);
+  const pending = await bot.db.get('SELECT * FROM report_jobs');
+  assert.equal(pending.status, 'pending');
+  assert.equal(pending.version, 0);
+  assert.equal(pending.lease_until, 0);
+  assert.ok(hasContinue(bot.sent('sendPhoto').at(-1)));
+  allowed = true;
+  bot.restart();
+  await bot.click(`continue:${pending.job_id}`);
+  assert.equal(bot.advances.length, 3);
+  assert.equal((await bot.db.get('SELECT * FROM report_jobs')).status, 'ready');
+  assert.equal(bot.renderedReports.at(-1).kind, 'stats');
+});
+
+test('invocation guard is forwarded per batch and stops after saving a partial checkpoint', async t => {
+  let allowed = true;
+  const guard = () => allowed;
+  const bot = await makeHarness(t, {
+    settings: AUTO,
+    faceitOverrides: stepsUntilDone(3, (state, budget) => {
+      assert.equal(budget.shouldContinue, guard);
+      allowed = false;
+    }),
+  });
+  bot.dependencies.shouldContinue = guard;
+  bot.restart();
+  await bot.send('/stats Nick');
+  assert.equal(bot.advances.length, 1, 'no repeated empty leased batches once the read budget expires');
+  const job = await bot.db.get('SELECT * FROM report_jobs');
+  assert.equal(job.status, 'pending');
+  assert.equal(job.version, 1);
+  assert.equal(job.lease_until, 0);
+  assert.equal(JSON.parse(job.state).step, 1);
+  assert.ok(hasContinue(bot.sent('sendPhoto').at(-1)));
+  await bot.click(`continue:${job.job_id}`);
+  assert.equal(bot.advances.length, 1, 'an expired invocation cannot advance a continuation');
+});
+
+test('ready callbacks remain deliverable and deduplicated after the invocation read guard expires', async t => {
+  let allowed = true;
+  const guard = () => allowed;
+  const bot = await makeHarness(t, { settings: AUTO, faceitOverrides: stepsUntilDone(1, (state, budget) => {
+    assert.equal(budget.shouldContinue, guard);
+    allowed = false;
+  }) });
+  bot.dependencies.shouldContinue = guard;
+  bot.restart();
+  await bot.send('/stats Nick');
+  assert.equal(bot.renderedReports.at(-1).kind, 'stats');
+  const ready = await bot.db.get('SELECT * FROM report_jobs');
+  assert.equal(ready.status, 'ready');
+  assert.equal(bot.sent('sendPhoto').length, 1);
+  await bot.click(`continue:${ready.job_id}`);
+  assert.equal(bot.advances.length, 2);
+  assert.equal(bot.sent('sendPhoto').length, 1);
+  assert.equal((await bot.db.get('SELECT * FROM report_jobs')).version, 1);
+});
+
+test('the invocation guard also reaches the initial report-cache history pre-scan', async t => {
+  const guard = () => false;
+  const bot = await makeHarness(t, {
+    settings: AUTO,
+    faceitOverrides: {
+      start: (nickname, kind) => ({ nickname, kind, phase: 'history' }),
+      advance: (state, budget) => {
+        assert.equal(budget.historyOnly, true);
+        assert.equal(budget.shouldContinue, guard);
+        assert.equal(budget.shouldContinue(), false);
+        return { done: false, state, progress: {} };
+      },
+    },
+  });
+  bot.dependencies.shouldContinue = guard;
+  bot.dependencies.reportCache = { get: () => { assert.fail('incomplete history cannot be a cache hit'); } };
+  bot.restart();
+  await bot.send('/stats Nick');
+  assert.equal(bot.advances.length, 1);
+  const job = await bot.db.get('SELECT * FROM report_jobs');
+  assert.equal(job.version, 0);
+  assert.equal(job.status, 'pending');
+  assert.ok(hasContinue(bot.sent('sendPhoto').at(-1)));
+});

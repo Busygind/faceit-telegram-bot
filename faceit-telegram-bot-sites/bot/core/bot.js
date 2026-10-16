@@ -1,14 +1,16 @@
 import { parseTeamspeak } from './teamspeak.js';
 import { todayPoll } from './poll.js';
-import { HELP, TS_HELP } from './text.js';
+import { HELP, TS_HELP, FACEIT_HELP } from './text.js';
 
 const COMMANDS = [
-  ['menu', 'Меню'], ['last', 'Последний матч: /last ник'], ['stats', '30 матчей: /stats ник'],
+  ['menu', 'Меню'], ['last', 'Мой последний матч или /last ник'], ['stats', 'Мои 30 матчей или /stats ник'],
+  ['setfaceit', 'Мой ник FACEIT: /setfaceit ник'], ['unsetfaceit', 'Удалить мой ник в этой группе'],
   ['poll', 'Играть сегодня — опрос'], ['ts', 'TeamSpeak этой группы'],
   ['setts', 'Настроить TeamSpeak (админ)'], ['setup', 'Настройка бота'], ['help', 'Помощь'],
 ].map(([command, description]) => ({ command, description }));
 const MENU = { inline_keyboard: [
-  [{ text: 'Последний матч', callback_data: 'hint:last' }, { text: '30 матчей', callback_data: 'hint:stats' }],
+  [{ text: 'Последний матч', callback_data: 'last' }, { text: '30 матчей', callback_data: 'stats' }],
+  [{ text: 'Мой FACEIT', callback_data: 'myfaceit' }],
   [{ text: 'Играть сегодня', callback_data: 'poll' }, { text: 'TeamSpeak', callback_data: 'ts' }],
   [{ text: 'Настроить TeamSpeak', callback_data: 'hint:setts' }, { text: 'Помощь', callback_data: 'help' }],
 ] };
@@ -28,9 +30,14 @@ function boundedInteger(value, fallback, maximum) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.min(maximum, Math.max(1, Math.floor(number))) : fallback;
 }
+function personalMessage(message) {
+  return Boolean(message && !message.sender_chat && !message.forward_origin && !message.forward_from
+    && !message.forward_from_chat && !message.forward_sender_name && !message.forward_date && !message.is_automatic_forward);
+}
+function validNickname(value) { return typeof value === 'string' && value.length > 0 && value.length <= 64 && !/[\s@\u0000-\u001f\u007f]/.test(value); }
 function safeError(error) {
   switch (error?.code) {
-    case 'INVALID_NICKNAME': return 'Укажите один ник FACEIT: /last ник или /stats ник.';
+    case 'INVALID_NICKNAME': return 'Укажите один ник FACEIT без @ и пробелов: /setfaceit ник, /last ник или /stats ник.';
     case 'PLAYER_NOT_FOUND': case 'FACEIT_NOT_FOUND': return 'Игрок FACEIT не найден. Проверьте ник.';
     case 'PLAYER_NO_CS2': case 'NO_CS2': case 'FACEIT_NO_CS2': return 'У этого игрока нет профиля FACEIT CS2.';
     case 'FACEIT_ACCESS_DENIED': case 'FACEIT_AUTH': case 'FACEIT_FORBIDDEN': return 'FACEIT отклонил ключ API. Владельцу бота нужно проверить доступ.';
@@ -41,13 +48,16 @@ function safeError(error) {
   }
 }
 
-export function createBot({ api, store, faceit, sealer, settings, renderCard, inputFile, reportCache, now = () => Math.floor(Date.now() / 1000) }) {
+export function createBot({ api, store, faceit, sealer, settings, renderCard, inputFile, reportCache, shouldContinue, now = () => Math.floor(Date.now() / 1000) }) {
+  // Optional invocation-scoped budget. It is never serialized into a checkpoint.
+  const canContinue = () => typeof shouldContinue !== 'function' || shouldContinue();
+  const requestBudget = typeof shouldContinue === 'function' ? { shouldContinue } : {};
   let me;
   const getMe = async () => me ?? (me = await api.getMe());
   const say = (ctx, text, keyboard = MENU) => api.sendMessage({ ...destination(ctx), text, ...(keyboard ? { reply_markup: keyboard } : {}) });
 
   async function access(ctx, user, admin = false) {
-    if (!user || user.is_bot || !(await store.allowed(ctx.chatId, settings.allowedChatIds))) return false;
+    if (!user || user.is_bot || !(await store.allowed(ctx.chatId))) return false;
     try {
       const member = await api.getChatMember({ chat_id: ctx.chatId, user_id: user.id });
       return admin ? ['creator', 'administrator'].includes(member.status)
@@ -176,7 +186,10 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
     const continuation = (state, progress) => {
       const retry = progress?.retryAt ?? state.retryAt;
       const waiting = retry && retry > now() ? ` FACEIT просит подождать ещё ${retry - now()} сек.` : '';
-      return notice(ctx, requestId, 'Сохранила прогресс', `${progress?.message ?? 'Загружаю историю и статистику'}.${waiting}\nНажмите «Продолжить». Повторять ник не нужно.`, continueKeyboard(jobId), state.profile?.nickname ?? state.nickname);
+      const timedOut = !canContinue() || now() >= deadline;
+      const reason = timedOut && !waiting ? 'Загрузка FACEIT не уложилась в безопасное время одного запроса' : progress?.message ?? 'Загружаю историю и статистику';
+      const loaded = state.selected?.length ? `Загружено ${state.matches?.length ?? 0} из ${state.selected.length} матчей.\n` : '';
+      return notice(ctx, requestId, 'Сохранила прогресс', `${reason}.${waiting}\n${loaded}Нажмите «Продолжить». Повторять ник не нужно.`, continueKeyboard(jobId), state.profile?.nickname ?? state.nickname);
     };
     let progress;
     for (let batch = 0; batch < batches; batch++) {
@@ -191,18 +204,18 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
           const report = { ...job.state.cachedReport, stale };
           return reportDelivery(ctx, jobId, report, job.state, { fileId: stale ? null : job.state.cachedFileId });
         }
-        const result = await faceit.advance(job.state, { maxRequests: settings.maxRequests });
+        const result = await faceit.advance(job.state, { maxRequests: settings.maxRequests, ...requestBudget });
         if (result.done) return reportDelivery(ctx, jobId, result.report, result.state);
         return notice(ctx, requestId, 'Запрос недоступен', 'Сохранённый отчёт повреждён. Отправьте /stats ник или /last ник заново.');
       }
-      if ((job.state.retryAt && job.state.retryAt > now()) || (batch > 0 && now() >= deadline)) {
+      if ((job.state.retryAt && job.state.retryAt > now()) || !canContinue() || (batch > 0 && now() >= deadline)) {
         return continuation(job.state, progress);
       }
       if (!(await store.leaseJob(jobId, job.version))) return notice(ctx, requestId, 'Запрос уже обрабатывается', 'Если выполнение прервалось, подождите две минуты и нажмите ещё раз.', continueKeyboard(jobId));
       let result;
       try {
         const historyOnly = Boolean(reportCache && !job.state.cacheChecked && job.state.phase === 'history');
-        result = await faceit.advance(job.state, { maxRequests: settings.maxRequests, ...(historyOnly ? { historyOnly: true } : {}) });
+        result = await faceit.advance(job.state, { maxRequests: settings.maxRequests, ...requestBudget, ...(historyOnly ? { historyOnly: true } : {}) });
       }
       catch (error) {
         await store.saveJob(jobId, job.version, job.state, 'pending');
@@ -222,16 +235,35 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
       if (result.done) return reportDelivery(ctx, jobId, result.report, result.state);
       progress = result.progress;
       const retry = progress?.retryAt ?? result.state.retryAt;
-      if (batch + 1 >= batches || now() >= deadline || (retry && retry > now())) return continuation(result.state, progress);
+      if (batch + 1 >= batches || now() >= deadline || !canContinue() || (retry && retry > now())) return continuation(result.state, progress);
     }
   }
 
   async function action(name, args, ctx, user, message, updateId) {
     const requestId = `u:${updateId}`;
     if (name === 'start' || name === 'menu' || name === 'help') {
-      // Default scope only; no chat-specific player identities are registered.
+      // Default Telegram command scope; personal FACEIT links stay chat-scoped.
       try { await api.setMyCommands({ commands: COMMANDS }); } catch { /* Menu still usable via buttons. */ }
       return say(ctx, HELP);
+    }
+    if (name === 'myfaceit' || (name === 'setfaceit' && !args.trim())) {
+      if (name === 'setfaceit' && !personalMessage(message)) return say(ctx, 'Настройку FACEIT нужно отправить лично от своего аккаунта, не пересланным сообщением.');
+      const link = await store.getPlayerLink(ctx.chatId, user.id);
+      return say(ctx, `${link ? `Ваш FACEIT в этой группе: ${link.nickname}.` : 'Ваш FACEIT в этой группе ещё не указан.'}\n\n${FACEIT_HELP}`);
+    }
+    if (name === 'setfaceit' || name === 'unsetfaceit') {
+      if (!personalMessage(message)) return say(ctx, 'Настройку FACEIT нужно отправить лично от своего аккаунта, не пересланным сообщением.');
+      if (name === 'unsetfaceit') {
+        if (args.trim()) return say(ctx, 'Используйте /unsetfaceit без аргументов — удаляется только ваш ник в этой группе.');
+        await store.deletePlayerLink(ctx.chatId, user.id);
+        return say(ctx, 'Ваш ник FACEIT удалён только из этой группы. Можно снова указать /setfaceit ник или запрашивать /last ник и /stats ник.');
+      }
+      const nickname = args.trim();
+      if (!validNickname(nickname)) return say(ctx, FACEIT_HELP);
+      // Validation fetches one CS2 profile only, never the history or a report.
+      const state = await faceit.start(nickname, 'last');
+      await store.savePlayerLink(ctx.chatId, user.id, state.profile);
+      return say(ctx, `Ваш FACEIT в этой группе: ${state.profile.nickname}. Теперь /last и /stats без ника показывают вашу статистику.\nДля замены: /setfaceit другой_ник. Для удаления: /unsetfaceit.`);
     }
     if (name === 'setup') {
       const admin = await access(ctx, user, true);
@@ -261,11 +293,18 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
       return say(ctx, `TeamSpeak для этого чата обновлён.${deleted ? '' : '\nНе удалось удалить команду с реквизитами: удалите её вручную.'}`);
     }
     if (name === 'last' || name === 'stats') {
-      if (!args.trim() || /\s/.test(args.trim())) return notice(ctx, requestId, 'Укажите ник FACEIT', `Укажите один ник FACEIT: /${name} ник. Ник не запоминается за чатом.`);
-      let state = await faceit.start(args.trim(), name);
+      const nickname = args.trim();
+      if (nickname && !validNickname(nickname)) return notice(ctx, requestId, 'Укажите ник FACEIT', `Укажите один ник FACEIT без @ и пробелов: /${name} ник. Либо сохраните свой: /setfaceit ник.`);
+      let link = null;
+      if (!nickname) {
+        if (message?.sender_chat) return notice(ctx, requestId, 'Нужен ваш аккаунт', 'Отправьте команду от своего аккаунта, чтобы получить личную статистику, либо укажите ник явно.');
+        link = await store.getPlayerLink(ctx.chatId, user.id);
+        if (!link) return notice(ctx, requestId, 'Укажите ваш FACEIT', `Сначала сохраните свой ник: /setfaceit ник. Или запросите любого игрока: /${name} ник.`);
+      }
+      let state = await faceit.start(nickname || link.nickname, name, ...(link ? [{ playerId: link.player_id }] : []));
       const jobId = `${(-ctx.chatId).toString(36)}_${updateId.toString(36)}`;
       if (reportCache) {
-        const history = await faceit.advance(state, { maxRequests: settings.maxRequests, historyOnly: true });
+        const history = await faceit.advance(state, { maxRequests: settings.maxRequests, ...requestBudget, historyOnly: true });
         state = history.state;
         const cached = await cachedReport(state);
         if (cached) return reportDelivery(ctx, jobId, cached.report, state, cached);
@@ -282,10 +321,15 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
       || rawContext?.update?.edited_channel_post) return;
     const ctx = context(message);
     // Telegram-generated migration service messages, not user-supplied arguments.
-    if (message.migrate_to_chat_id || message.migrate_from_chat_id) {
-      const oldId = message.migrate_from_chat_id ?? ctx.chatId;
-      const newId = message.migrate_to_chat_id ?? ctx.chatId;
-      if (await claim(updateId, ctx, 'migration')) await store.migrateChat(oldId, newId, settings.allowedChatIds, sealer);
+    if (message.migrate_to_chat_id != null || message.migrate_from_chat_id != null) {
+      const movingTo = Number.isSafeInteger(message.migrate_to_chat_id) && message.chat.type === 'group'
+        && message.migrate_from_chat_id == null;
+      const movingFrom = Number.isSafeInteger(message.migrate_from_chat_id) && message.chat.type === 'supergroup'
+        && message.migrate_to_chat_id == null;
+      if (!movingTo && !movingFrom) return;
+      const oldId = movingFrom ? message.migrate_from_chat_id : ctx.chatId;
+      const newId = movingTo ? message.migrate_to_chat_id : ctx.chatId;
+      if (await claim(updateId, ctx, 'migration')) await store.migrateChat(oldId, newId, sealer);
       return;
     }
     const cmd = command(message.text);
@@ -294,15 +338,12 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
     const faceitCommand = cmd.name === 'last' || cmd.name === 'stats';
     if (!['group', 'supergroup'].includes(message.chat.type)) {
       if (faceitCommand) {
-        if (await claim(updateId, ctx, cmd.name)) return notice(ctx, `u:${updateId}`, 'Нужна группа', 'Добавьте меня в разрешённую группу и отправьте /menu. FACEIT команды доступны только в группе.');
+        if (await claim(updateId, ctx, cmd.name)) return notice(ctx, `u:${updateId}`, 'Нужна группа', 'Добавьте меня в группу и отправьте /menu. FACEIT команды доступны только в группе.');
         return;
       }
-      return say(ctx, 'Добавьте меня в группу и отправьте /menu. TeamSpeak, опросы и FACEIT команды доступны только в разрешённой группе.');
+      return say(ctx, 'Добавьте меня в группу и отправьте /menu. TeamSpeak, опросы и FACEIT команды доступны только в группе.');
     }
-    if (!(await store.allowed(ctx.chatId, settings.allowedChatIds))) {
-      if (cmd.name === 'setup' || cmd.name === 'start' || cmd.name === 'menu') return say(ctx, `Этот чат ещё не разрешён. Его ID: ${ctx.chatId}. Владелец бота должен добавить ID в конфигурацию и развернуть её. Пароли и ключи сюда не отправляйте.`, null);
-      return;
-    }
+    if (!(await store.allowed(ctx.chatId))) return;
     if (!(await access(ctx, message.from))) {
       if (faceitCommand) {
         if (await claim(updateId, ctx, cmd.name)) return notice(ctx, `u:${updateId}`, 'Нет доступа', 'Не могу подтвердить членство. Выдайте боту права администратора; команды должен отправлять участник от своего аккаунта.');
@@ -326,10 +367,10 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
     if (!message?.chat || !['group', 'supergroup'].includes(message.chat.type)) return;
     const ctx = context(message);
     const updateId = rawContext?.update?.update_id;
-    const faceitCallback = query.data?.startsWith('continue:') || query.data === 'hint:last' || query.data === 'hint:stats';
+    const faceitCallback = query.data?.startsWith('continue:') || ['last', 'stats', 'hint:last', 'hint:stats'].includes(query.data);
     if (!(await access(ctx, query.from))) {
-      if (faceitCallback && await store.allowed(ctx.chatId, settings.allowedChatIds) && await claim(updateId, ctx, 'callback')) {
-        return notice(ctx, `u:${updateId}`, 'Нет доступа', 'Не могу подтвердить членство. Команду должен отправить участник разрешённой группы.');
+      if (faceitCallback && await store.allowed(ctx.chatId) && await claim(updateId, ctx, 'callback')) {
+        return notice(ctx, `u:${updateId}`, 'Нет доступа', 'Не могу подтвердить членство. Команду должен отправить участник этой группы.');
       }
       return;
     }
@@ -337,8 +378,8 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
     try {
       if (query.data?.startsWith('continue:')) return await advanceJob(ctx, query.data.slice(9), `u:${updateId}`);
       if (query.data === 'hint:setts') return await say(ctx, TS_HELP);
-      if (query.data === 'hint:last' || query.data === 'hint:stats') return await notice(ctx, `u:${updateId}`, 'Укажите ник FACEIT', `Отправьте /${query.data.slice(5)} ник_FACEIT. Ник нужен в каждой команде; список игроков не хранится.`);
-      if (['help', 'ts', 'poll'].includes(query.data)) return await action(query.data, '', ctx, query.from, null, updateId);
+      if (['last', 'stats', 'hint:last', 'hint:stats'].includes(query.data)) return await action(query.data.replace('hint:', ''), '', ctx, query.from, null, updateId);
+      if (['help', 'ts', 'poll', 'myfaceit'].includes(query.data)) return await action(query.data, '', ctx, query.from, null, updateId);
       return await say(ctx, 'Кнопка устарела. Используйте /menu.');
     } catch (error) {
       if (faceitCallback) return notice(ctx, `u:${updateId}`, 'Не удалось выполнить запрос', safeError(error));

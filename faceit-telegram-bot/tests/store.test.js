@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { makeStore } from './helpers.js';
 import { createSealer } from '../tgcloud/lib/credentials.js';
 import { parseTeamspeak, validateAddress } from '../tgcloud/lib/teamspeak.js';
-import { validateSettings } from '../tgcloud/lib/settings.js';
+import { DEFAULT_SETTINGS, validateSettings } from '../tgcloud/lib/settings.js';
 
 const sealer = () => createSealer({ keyHex: '11'.repeat(32), keyId: 'testing' });
 
@@ -29,26 +29,46 @@ test('atomic group migration binds new AAD, retires old id, and never overwrites
   const { store, db } = await makeStore(); t.after(() => db.close());
   const crypt = sealer();
   await store.saveSettings(-10, { host: 'a.test:1', password: 'pw' }, crypt);
-  assert.equal(await store.migrateChat(-10, -100001, [-10], crypt), true);
+  assert.equal(await store.migrateChat(-10, -100001, crypt), true);
   assert.equal(await store.getSettings(-10), null);
-  assert.equal(await store.allowed(-10, [-10]), false);
-  assert.equal(await store.allowed(-100001, [-10]), true);
+  assert.equal(await store.allowed(-10), false);
+  assert.equal(await store.allowed(-100001), true);
   const row = await store.getSettings(-100001);
   assert.equal(crypt.open(-100001, row.ciphertext).password, 'pw');
   assert.throws(() => crypt.open(-10, row.ciphertext));
   await store.saveSettings(-20, { host: 'b.test:2', password: 'keep' }, crypt);
-  assert.equal(await store.migrateChat(-100001, -20, [-10], crypt), false);
+  assert.equal(await store.migrateChat(-100001, -20, crypt), false);
   assert.equal(crypt.open(-20, (await store.getSettings(-20)).ciphertext).password, 'keep');
-  assert.equal(await store.migrateChat(-999, -888, [-10], crypt), false);
+  assert.equal(await store.migrateChat(-100001, -10, crypt), false, 'a retired destination cannot be re-enabled');
 });
 
-test('migration of unconfigured allowed group and dedup leave no default credentials', async (t) => {
+test('migration of any unconfigured group and dedup leave no default credentials', async (t) => {
   const { store, db } = await makeStore(); t.after(() => db.close());
-  assert.equal(await store.migrateChat(-10, -1000, [-10], sealer()), true);
+  assert.equal(await store.migrateChat(-10, -1000, sealer()), true);
   assert.equal((await store.getSettings(-1000)).ciphertext, null);
-  assert.equal(await store.allowed(-10, [-10]), false);
-  assert.equal(await store.migrateChat(-10, -1000, [-10], sealer()), false);
-  assert.equal(await store.allowed(-30, [-10]), false);
+  assert.equal(await store.allowed(-10), false);
+  assert.equal(await store.migrateChat(-10, -1000, sealer()), false);
+  assert.equal(await store.allowed(-30), true);
+  assert.equal(await store.migrateChat(-10, -2000, sealer()), false);
+  assert.equal(await store.getSettings(-2000), null);
+});
+
+test('group access accepts unknown negative ids, ignores legacy allowlists and rejects invalid ids before storage', async (t) => {
+  const { store, db } = await makeStore(); t.after(() => db.close());
+  for (const chatId of [-1004418477887, -4418477887, -1]) {
+    assert.equal(await store.allowed(chatId), true);
+    assert.equal(await store.allowed(chatId, [-10]), true, 'an obsolete second argument never restricts access');
+  }
+  const invalidStore = new store.constructor(new Proxy({}, { get() { assert.fail('Invalid ids cannot access storage'); } }));
+  for (const chatId of [0, 1, -1.5, NaN, Infinity, Number.MIN_SAFE_INTEGER - 1, '-10', null, undefined]) {
+    assert.equal(await invalidStore.allowed(chatId), false);
+    assert.equal(await invalidStore.migrateChat(chatId, -1004418477887, sealer()), false);
+  }
+  for (const chatId of [0, 1, -1.5, NaN, Infinity, Number.MIN_SAFE_INTEGER - 1, '-10']) {
+    assert.equal(await store.migrateChat(-4418477887, chatId, sealer()), false);
+  }
+  assert.equal(await store.migrateChat(-4418477887, -4418477887, sealer()), false);
+  assert.equal((await db.all('SELECT * FROM chat_settings')).length, 0);
 });
 
 test('job lease, optimistic versions, restart persistence, TTL and delivery dedup', async (t) => {
@@ -94,9 +114,11 @@ test('TS parser preserves inner password spaces and requires explicit no-passwor
 });
 
 test('configuration validates without disclosing values', () => {
-  const settings = { allowedChatIds: [-10], faceitKey: 'a'.repeat(32), encryptionKeyHex: '11'.repeat(32), encryptionKeyId: 'key-1', maxRequests: 8 };
+  const settings = { faceitKey: 'a'.repeat(32), encryptionKeyHex: '11'.repeat(32), encryptionKeyId: 'key-1', maxRequests: 8 };
   assert.equal(validateSettings(settings), settings);
-  for (const change of [{ allowedChatIds: [1] }, { faceitKey: '' }, { encryptionKeyHex: 'broken' }, { maxRequests: 17 }]) {
+  assert.equal(Object.hasOwn(DEFAULT_SETTINGS, 'allowedChatIds'), false);
+  assert.doesNotThrow(() => validateSettings({ ...settings, allowedChatIds: [1, 'legacy-value'] }));
+  for (const change of [{ faceitKey: '' }, { encryptionKeyHex: 'broken' }, { maxRequests: 17 }]) {
     assert.throws(() => validateSettings({ ...settings, ...change }), /^Error: CONFIG_/);
   }
 });

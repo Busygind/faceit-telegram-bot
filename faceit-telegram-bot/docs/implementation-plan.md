@@ -1,6 +1,6 @@
 # План реализации Telegram бота FACEIT CS2 — Telegram Serverless
 
-Актуализирован 15 октября 2026 года после выбора JavaScript + Telegram Serverless. Заменяет Python/Docker/VPS план. Каталог проекта: `/Users/busygind02/IdeaProject/faceit-telegram-bot`.
+Исторический план первой реализации от 15 октября 2026 года после выбора JavaScript + Telegram Serverless. Заменяет Python/Docker/VPS план. Требования к доступу актуализированы 16 октября: список разрешённых chat ID отсутствует, работа доступна в любой группе/супергруппе после добавления и выдачи прав; текущие личные FACEIT-привязки описаны в README. Каталог проекта: `/Users/busygind02/IdeaProject/faceit-telegram-bot`.
 
 ## Задача
 
@@ -40,7 +40,7 @@
 
 ### Этап 3 Telegram сценарии
 
-**Реализовать:** `tgcloud/lib/bot.js`, `tgcloud/lib/text.js`, `tgcloud/lib/poll.js`, `tgcloud/handlers/message.js`, `tgcloud/handlers/callback_query.js`. Slash-меню, admin/member access, allowlist, group/topic контекст, обязательный ник, TS команда и best-effort удаление, нативный опрос с точными девятью вариантами/флагами. Checkpoints в SQLite, безопасная кнопка продолжения, idempotency без слепого retry неопределённого POST.
+**Реализовать:** `tgcloud/lib/bot.js`, `tgcloud/lib/text.js`, `tgcloud/lib/poll.js`, `tgcloud/handlers/message.js`, `tgcloud/handlers/callback_query.js`. Slash-меню, admin/member access во всех group/supergroup без списка допуска, group/topic контекст, обязательный ник для исходной версии (сейчас необязателен после `/setfaceit`), TS команда и best-effort удаление, нативный опрос с точными девятью вариантами/флагами. Checkpoints в SQLite, безопасная кнопка продолжения, idempotency без слепого retry неопределённого POST.
 
 **Документация:** [sendPoll](https://core.telegram.org/bots/api#sendpoll), Serverless handlers и raw SQL.
 

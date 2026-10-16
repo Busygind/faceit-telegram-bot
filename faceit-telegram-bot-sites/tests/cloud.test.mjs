@@ -6,7 +6,7 @@ import { CLOUD_HANDLER_MS, createWebhook, createCloudRuntime, health, readConfig
 import { SQL_SCHEMA, Store } from '../bot/core/store.js';
 import { REPORT_CACHE_SCHEMA } from '../bot/report-cache.mjs';
 const CHAT=-1004393474895;
-const configuration={BOT_TOKEN:`123456:${'fixture_'.repeat(4)}`,FACEIT_API_KEY:'fixture-faceit-key-123456',TS_ENCRYPTION_KEY:'12'.repeat(32),WEBHOOK_SECRET:'fixture_'.repeat(6),ALLOWED_CHAT_IDS:JSON.stringify([CHAT])};
+const configuration={BOT_TOKEN:`123456:${'fixture_'.repeat(4)}`,FACEIT_API_KEY:'fixture-faceit-key-123456',TS_ENCRYPTION_KEY:'12'.repeat(32),WEBHOOK_SECRET:'fixture_'.repeat(6)};
 function database(t){
  const sql=new DatabaseSync(':memory:');t.after(()=>sql.close());for(const statement of [...SQL_SCHEMA,...REPORT_CACHE_SCHEMA])sql.exec(statement);
  const binding={prepare(query){const stmt=sql.prepare(query);const bound=(values=[])=>({bind(...next){return bound(next);},async run(){const result=stmt.run(...values);return{meta:{changes:Number(result.changes),last_row_id:Number(result.lastInsertRowid)}};},async first(){return stmt.get(...values)??null;},async all(){return{results:stmt.all(...values)};}});return bound();}};
@@ -20,8 +20,28 @@ test('D1 adapter runs the shared Store with bound values and persisted lease/che
  await assert.rejects(adapter.get('SELECT :missing',{}),/CLOUD_DATABASE_BINDING/);
 });
 test('configuration and health expose no secrets',async()=>{
- assert.deepEqual(readConfiguration(configuration).chatIds,[CHAT]);for(const key of ['BOT_TOKEN','FACEIT_API_KEY','TS_ENCRYPTION_KEY','WEBHOOK_SECRET'])assert.throws(()=>readConfiguration({...configuration,[key]:''}),/CLOUD_CONFIGURATION/);
+ assert.deepEqual(readConfiguration(configuration),{});for(const key of ['BOT_TOKEN','FACEIT_API_KEY','TS_ENCRYPTION_KEY','WEBHOOK_SECRET'])assert.throws(()=>readConfiguration({...configuration,[key]:''}),/CLOUD_CONFIGURATION/);
  const body=JSON.stringify(await health({...configuration,DB:{}}).json());assert.ok(!body.includes(configuration.BOT_TOKEN));assert.equal(JSON.parse(body).configured,true);assert.equal((await health({}).json()).configured,false);
+});
+test('legacy ALLOWED_CHAT_IDS is ignored rather than parsed or enforced',()=>{
+ for(const legacy of ['[]','[-42]','invalid-json','[0,1]','null']) assert.deepEqual(readConfiguration({...configuration,ALLOWED_CHAT_IDS:legacy}),{});
+});
+test('cloud runtime accepts an unknown basic group or supergroup despite legacy allowlist',async t=>{
+ const {sql,binding}=database(t);const messages=[];
+ const runtime=createCloudRuntime({...configuration,ALLOWED_CHAT_IDS:'[-42]',DB:binding},{
+  fetch:async(url,options)=>{
+   const method=new URL(url).pathname.split('/').at(-1);const params=JSON.parse(options.body);
+   if(method==='getChatMember')return Response.json({ok:true,result:{status:'member'}});
+   assert.ok(['setMyCommands','sendMessage'].includes(method));if(method==='sendMessage')messages.push(params);
+   return Response.json({ok:true,result:method==='setMyCommands'?true:{message_id:10}});
+  },onMetrics:()=>{},onCacheEvent:()=>{},onDiagnostic:()=>{},
+ });
+ for(const [index,type] of ['group','supergroup'].entries()){
+  const id=index===0?-12345:-1004418477887;
+  await runtime({update_id:2000+index,message:{message_id:2000+index,chat:{id,type},from:{id:9,is_bot:false},text:'/menu'}});
+  assert.equal(messages.at(-1).chat_id,id);
+ }
+ assert.equal(messages.length,2);assert.equal(sql.prepare('SELECT COUNT(*) AS n FROM deliveries').get().n,2);
 });
 test('webhook rejects unauthenticated and malformed requests before processing',async()=>{
  let handled=0;const handle=createWebhook({getEnv:()=>({...configuration,DB:{}}),getRuntime:()=>async()=>{handled++;}});
@@ -152,4 +172,70 @@ test('webhook resolves a fresh runtime even when the environment object is reuse
  assert.equal((await handle(request({update_id:816}))).status,200);
  assert.equal((await handle(request({update_id:817}))).status,200);
  assert.equal(created,2);
+});
+
+function coldStatsWithClock(t, { initialDelay = 0, readMs = 450, rateLimit = false } = {}) {
+ const {sql,binding}=database(t);const base=1800000000000;let clock=base+initialDelay;
+ // Keep legacy implicit clocks under test too: the former 25-second setting
+ // must reproduce the real pause instead of passing under instant mock I/O.
+ const originalDateNow=Date.now;Date.now=()=>clock;t.after(()=>{Date.now=originalDateNow;});
+ const calls=[];const metrics=[];const methods=[];const timer=fakeTimer();
+ const prepare=binding.prepare.bind(binding);
+ binding.prepare=query=>{
+  const original=prepare(query);
+  const wrap=statement=>Object.fromEntries(Object.entries(statement).map(([name,fn])=>[name,name==='bind'? (...args)=>wrap(fn(...args)) : async(...args)=>{const result=await fn(...args);clock+=120;return result;}]));
+  return wrap(original);
+ };
+ const item=i=>({match_id:`slow-${i}`,game_id:'cs2',game:'cs2',status:'FINISHED',finished_at:base/1000-1000-i*86400,best_of:1,
+  teams:{faction1:{faction_id:'a',name:'Own',roster:[{player_id:'p',nickname:'Player'}]},faction2:{faction_id:'b',name:'Other',roster:[{player_id:'q',nickname:'Other'}]}},results:{winner:'faction1',score:{faction1:1,faction2:0}}});
+ const matches=Array.from({length:30},(_,i)=>item(i));
+ const fetch=async(url,options)=>{
+  const target=new URL(url);const started=clock;
+  if(target.origin==='https://api.telegram.org'){
+   const method=target.pathname.split('/').at(-1);methods.push({method,started});clock+=250;
+   if(method==='getMe')return Response.json({ok:true,result:{id:999,username:'road_to_3_elo_bot'}});
+   if(method==='getChatMember')return Response.json({ok:true,result:{status:'member'}});
+   assert.equal(method,'sendPhoto');assert.ok(options.body instanceof FormData);assert.equal(options.body.get('caption'),null);
+   return Response.json({ok:true,result:{message_id:99}});
+  }
+  assert.equal(target.origin,'https://open.faceit.com');calls.push({path:target.pathname,started});clock+=readMs;
+  if(target.pathname.endsWith('/players'))return Response.json({player_id:'p',nickname:'Player',games:{cs2:{faceit_elo:1710,skill_level:8}}});
+  if(target.pathname.endsWith('/history'))return Response.json({items:matches});
+  const match=matches.find(m=>target.pathname.includes(`/matches/${m.match_id}`));assert.ok(match);
+  if(!target.pathname.endsWith('/stats'))return Response.json(match);
+  if(rateLimit)return Response.json({}, {status:429,headers:{'retry-after':'120'}});
+  return Response.json({rounds:[{match_id:match.match_id,game_id:'cs2',match_round:1,round_stats:{Map:'de_inferno',Rounds:'21',Winner:'a'},teams:[
+   {team_id:'a',team_stats:{'Final Score':'13'},players:[{player_id:'p',nickname:'Player',player_stats:{Kills:'20',Deaths:'11',Assists:'5',Headshots:'5','Total Damage':'2100'}}]},
+   {team_id:'b',team_stats:{'Final Score':'8'},players:[{player_id:'q',nickname:'Other',player_stats:{Kills:'11',Deaths:'20',Assists:'1'}}]},
+  ]}]});
+ };
+ const runtime=createCloudRuntime({...configuration,DB:binding},{...timer,now:()=>clock,fetch,onDiagnostic:()=>{},onMetrics:value=>metrics.push(value),onCacheEvent:()=>{}});
+ return {sql,calls,methods,metrics,base,clock:()=>clock,run:()=>runtime({update_id:950,message:{message_id:950,chat:{id:CHAT,type:'supergroup'},from:{id:123,is_bot:false},text:'/stats Player'}},{startedAt:base})};
+}
+
+test('ordinary cold 30-match report crossing 25 seconds completes in one update with fewer D1 checkpoints',async t=>{
+ const h=coldStatsWithClock(t);await h.run();
+ const row=h.sql.prepare('SELECT status,state FROM report_jobs').get();assert.equal(row.status,'ready');assert.equal(JSON.parse(row.state).matches.length,30);
+ assert.equal(h.calls.length,62);assert.ok(h.metrics[0].elapsedMs>25000);assert.ok(h.metrics[0].elapsedMs<65000);
+ assert.ok(h.metrics[0].databaseCalls<50);assert.deepEqual(h.methods.filter(x=>x.method==='sendPhoto').length,1);
+ assert.equal(h.sql.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE kind='notice'").get().n,0);
+ assert.equal(h.sql.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE kind='photo' AND status='sent'").get().n,1);
+});
+
+test('work budget includes initial webhook delay and stops new FACEIT reads before the 90-second delivery deadline',async t=>{
+ const h=coldStatsWithClock(t,{initialDelay:50000,readMs:1500});await h.run();
+ assert.ok(h.calls.length>2 && h.calls.length<62);
+ assert.ok(h.calls.every(c=>c.started<h.base+65000));
+ const row=h.sql.prepare('SELECT status,state FROM report_jobs').get();assert.equal(row.status,'pending');assert.ok(JSON.parse(row.state).matches.length<30);
+ const photo=h.methods.find(x=>x.method==='sendPhoto');assert.ok(photo);assert.ok(photo.started<h.base+CLOUD_HANDLER_MS);
+ assert.ok(h.clock()<h.base+CLOUD_HANDLER_MS);
+ assert.equal(h.sql.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE kind='notice' AND status='sent'").get().n,1);
+});
+
+test('expanded cloud budget still checkpoints and pauses immediately for FACEIT Retry-After',async t=>{
+ const h=coldStatsWithClock(t,{rateLimit:true});await h.run();
+ const row=h.sql.prepare('SELECT status,state FROM report_jobs').get();const state=JSON.parse(row.state);
+ assert.equal(row.status,'pending');assert.equal(h.calls.filter(c=>c.path.endsWith('/stats')).length,1);
+ assert.ok(state.retryAt>Math.floor(h.clock()/1000));assert.equal(state.phase,'stats');
+ assert.equal(h.sql.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE kind='notice' AND status='sent'").get().n,1);
 });

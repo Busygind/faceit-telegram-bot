@@ -3,7 +3,7 @@ export default function Home() {
     <section style={{ maxWidth: 620, margin: '0 auto' }}>
       <div style={{ color: '#ff6b2b', letterSpacing: 2, fontSize: 14 }}>FACEIT / COUNTER-STRIKE 2</div>
       <h1 style={{ fontSize: 44, marginTop: 26 }}>Road to 3 ELO</h1>
-      <p style={{ color: '#b2b2ba', fontSize: 19, lineHeight: 1.7 }}>Облачная копия Telegram-бота. Команды и карточки доступны только в разрешённом Telegram-чате.</p>
+      <p style={{ color: '#b2b2ba', fontSize: 19, lineHeight: 1.7 }}>Облачная копия Telegram-бота. Добавьте бота в группу, выдайте необходимые права и используйте команды. Настройки и личные ники FACEIT изолированы по чатам.</p>
       <div style={{ background: '#202027', borderRadius: 18, padding: 26, marginTop: 30, lineHeight: 1.9 }}>
         <div><code>/last ник</code> — последний матч</div><div><code>/stats ник</code> — последние 30 матчей</div><div><code>/poll</code> — играть сегодня</div><div><code>/ts</code> — TeamSpeak чата</div>
       </div>

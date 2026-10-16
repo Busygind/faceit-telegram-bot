@@ -64,7 +64,7 @@ async function harness({ pauseStats = false, photoFailure = false } = {}) {
       return { message_id: messageId++ };
     },
   };
-  const bot = createBot({ api, store, faceit, settings: { allowedChatIds: [CHAT, -200], maxRequests: 2 },
+  const bot = createBot({ api, store, faceit, settings: { maxRequests: 2 },
     sealer: {}, renderCard: report => { renderedReports.push(structuredClone(report)); return renderReportCard(report); },
     inputFile: (bytes) => bytes, now: () => clock });
   const user = { id: 99, is_bot: false };

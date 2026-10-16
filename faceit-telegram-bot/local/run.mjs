@@ -23,13 +23,15 @@ export function parseOptions(args, root = resolve(import.meta.dirname, '..')) {
     else if (args[i] === '--faceit-key-file') options.faceitKeyFile = args[++i];
     else throw new Error('LOCAL_ARGUMENTS');
   }
-  if (!options.chatIds.length) options.chatIds = [-1004393474895];
+  if (options.chatIds.length && !options.checkOnly) throw new Error('LOCAL_ARGUMENTS');
   return options;
 }
 
 export async function runLocal(options, { fetch = globalThis.fetch, signal, onStatus = () => {} } = {}) {
   const { root, expectedUsername = 'road_to_3_elo_bot', checkOnly } = options;
   const credentials = await loadCredentials(options);
+  // Optional chat IDs are diagnostic targets, never a runtime allowlist.
+  if (credentials.chatIds.length && !checkOnly) throw new Error('LOCAL_ARGUMENTS');
   const networkFetch = (url, request = {}) => {
     const target = new URL(url);
     if (!['https://open.faceit.com', 'https://api.telegram.org'].includes(target.origin) || target.username || target.password) {
@@ -46,7 +48,7 @@ export async function runLocal(options, { fetch = globalThis.fetch, signal, onSt
   const webhook = await api.getWebhookInfo();
   if (!webhook || typeof webhook.url !== 'string') throw new Error('LOCAL_WEBHOOK_CHECK');
   if (webhook.url) throw new Error('WEBHOOK_ACTIVE');
-  let canDelete = true;
+  let canDelete = credentials.chatIds.length ? true : null;
   for (const chatId of credentials.chatIds) {
     let chat, member;
     try {
@@ -67,7 +69,7 @@ export async function runLocal(options, { fetch = globalThis.fetch, signal, onSt
   try {
     const key = await loadEncryptionKey(root);
     database = await openDatabase(join(folder, 'bot.sqlite'));
-    const settings = { allowedChatIds: credentials.chatIds, maxRequests: 4, autoAdvanceBatches: 32, autoAdvanceSeconds: 90 };
+    const settings = { maxRequests: 4, autoAdvanceBatches: 32, autoAdvanceSeconds: 90 };
     const bot = createBot({
       api, store: new Store(database.db), settings,
       reportCache: createReportCache({ db: database.db, botToken: credentials.token, faceitKey: credentials.faceitKey }),

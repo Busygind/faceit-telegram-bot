@@ -15,7 +15,7 @@
 
 ## Текущий статус
 
-`@road_to_3_elo_bot` создан; доступ к Telegram Serverless запрошен, пока лист ожидания. До одобрения нельзя пройти CLI login и облачную публикацию. Подготовить FACEIT key можно независимо от Telegram. Тестовый ник — `aghori-`, подтверждённая тестовая супергруппа — `chat_id -1004393474895`. Доступы ещё не включены.
+`@road_to_3_elo_bot` создан; доступ к Telegram Serverless запрошен, пока лист ожидания. До одобрения нельзя пройти Telegram Serverless CLI login и публикацию на этой платформе. Текущая облачная копия работает на Sites; локальный runner — резерв. Подготовить FACEIT key можно независимо от Telegram. Тестовый ник — `aghori-`, пример тестовой супергруппы — `chat_id -1004393474895`; этот ID не ограничивает доступ.
 
 ## Инсталляция после одобрения Serverless
 
@@ -23,7 +23,7 @@
 
 ```bash
 npx tgcloud login
-npm run configure -- --faceit-key-file /Users/busygind02/IdeaProject/faceit-telegram-bot/.secrets/faceit.key --chat-id -1004393474895
+npm run configure -- --faceit-key-file /Users/busygind02/IdeaProject/faceit-telegram-bot/.secrets/faceit.key
 npm run deploy -- --dry-run
 npm run deploy
 npx tgcloud migrate --dry-run
@@ -31,6 +31,8 @@ npx tgcloud migrate
 npx tgcloud webhook sync
 npx tgcloud webhook
 ```
+
+Список разрешённых чатов отсутствует; `configure` не требует `--chat-id` или `--bootstrap`. Добавить бота и выдать права можно в любой группе/супергруппе без изменения конфигурации. TeamSpeak и личные FACEIT-привязки остаются раздельными по чатам, `/setts` — только для администратора текущей группы. Рабочие команды в личке и каналах не поддерживаются. Открытое подключение групп увеличивает общий расход FACEIT API и хостинга; ограниченные задания и rate limit не гарантируют квоты на каждую группу.
 
 CLI token вводится интерактивно, сохраняется в управляемой CLI папке `.tgcloud/`. Не читать и не редактировать её вручную. Для собственного CI CLI поддерживает `TGCLOUD_TOKEN`; значение выдаётся менеджером секретов без echo. FACEIT key можно передать через уже приватно настроенную `FACEIT_API_KEY`, не через аргумент команды. Предпочтителен mode-0600 файл.
 
@@ -62,7 +64,7 @@ CLI token вводится интерактивно, сохраняется в �
 ## Диагностика
 
 1. `tgcloud webhook`: платформа получает нужные update types; в облаке должны быть только message и callback_query handlers.
-2. `/setup`: разрешён ли chat_id, есть ли у бота права администратора и отправки. Telegram гарантирует проверку чужого membership через getChatMember только для бота-администратора.
+2. `/setup`: правильный ли это групповой чат, какой у него ID, есть ли у бота права администратора и отправки. Telegram гарантирует проверку чужого membership через getChatMember только для бота-администратора.
 3. Плохой FACEIT key/401/403: не повторять бесконечно; перевыпустить Server side key и обновить private config.
 4. 429/5xx: дождаться retryAt и нажать «Продолжить». Invocation не живёт в фоне. Можно уменьшить maxRequests в защищённом конфиге с повторным configure/deploy после оценки лимита среды.
 5. Кнопка устарела/другой чат/тема: новый запрос с ником в нужной теме; не менять чужой job адрес доставки.
