@@ -14,14 +14,55 @@ export const SQL_SCHEMA = [
     state TEXT NOT NULL, status TEXT NOT NULL, version INTEGER NOT NULL,
     lease_until INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS player_links (
+    chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, player_id TEXT NOT NULL,
+    nickname TEXT NOT NULL, updated_at INTEGER NOT NULL
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_player_links_chat_user ON player_links(chat_id,user_id)`,
   `CREATE INDEX IF NOT EXISTS idx_jobs_updated ON report_jobs(updated_at)`,
   `CREATE INDEX IF NOT EXISTS idx_deliveries_updated ON deliveries(updated_at)`,
 ];
+
+function validatePlayerLinkOwner(chatId, userId) {
+  if (!Number.isSafeInteger(chatId) || chatId >= 0 || !Number.isSafeInteger(userId) || userId <= 0) {
+    throw new Error('PLAYER_LINK_INVALID');
+  }
+}
+
+function validatePlayerLinkProfile(profile) {
+  if (!profile || typeof profile.playerId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(profile.playerId)
+    || typeof profile.nickname !== 'string' || profile.nickname.length < 1 || profile.nickname.length > 64
+    || /[\s\p{Cc}\p{Cf}]/u.test(profile.nickname)) throw new Error('PLAYER_LINK_INVALID');
+}
 
 export class Store {
   constructor(db, now = () => Math.floor(Date.now() / 1000)) {
     this.db = db;
     this.now = now;
+  }
+
+  async getPlayerLink(chatId, userId) {
+    validatePlayerLinkOwner(chatId, userId);
+    return (await this.db.get('SELECT * FROM player_links WHERE chat_id=:chat AND user_id=:user', {
+      ':chat': chatId, ':user': userId,
+    })) ?? null;
+  }
+
+  async savePlayerLink(chatId, userId, profile) {
+    validatePlayerLinkOwner(chatId, userId);
+    validatePlayerLinkProfile(profile);
+    await this.db.run(`INSERT INTO player_links(chat_id,user_id,player_id,nickname,updated_at)
+      VALUES(:chat,:user,:player,:nickname,:now) ON CONFLICT(chat_id,user_id)
+      DO UPDATE SET player_id=excluded.player_id,nickname=excluded.nickname,updated_at=excluded.updated_at`, {
+      ':chat': chatId, ':user': userId, ':player': profile.playerId, ':nickname': profile.nickname, ':now': this.now(),
+    });
+  }
+
+  async deletePlayerLink(chatId, userId) {
+    validatePlayerLinkOwner(chatId, userId);
+    await this.db.run('DELETE FROM player_links WHERE chat_id=:chat AND user_id=:user', {
+      ':chat': chatId, ':user': userId,
+    });
   }
 
   async getSettings(chatId) {

@@ -13,7 +13,7 @@ const column = (type) => (name) => {
 const tables = [];
 globalThis.__faceitTestSchema = {
   table(name, columns, extras) { const table = { name, columns }; if (extras) extras(columns); tables.push(table); return table; },
-  integer: column('INTEGER'), text: column('TEXT'), index: () => ({ on: () => ({}) }),
+  integer: column('INTEGER'), text: column('TEXT'), index: () => ({ on: () => ({}) }), uniqueIndex: () => ({ on: () => ({}) }),
 };
 const fakeSettings = {
   allowedChatIds: [-100], faceitKey: 'synthetic-local-faceit-test-key',
@@ -27,7 +27,7 @@ registerHooks({
   },
   load(url, context, next) {
     const source = url === 'test:sdk' ? 'export const {api,db,fetch,InputFile} = globalThis.__faceitTestSdk;'
-      : url === 'test:sdk/db' ? 'export const {table,integer,text,index}=globalThis.__faceitTestSchema;'
+      : url === 'test:sdk/db' ? 'export const {table,integer,text,index,uniqueIndex}=globalThis.__faceitTestSchema;'
         : url === 'test:settings' ? `export default ${JSON.stringify(fakeSettings)};` : null;
     return source == null ? next(url, context) : { format: 'module', source, shortCircuit: true };
   },
@@ -36,7 +36,7 @@ registerHooks({
 test('deployed schema and local SQLite contract have exactly matching tables/columns/types', async (t) => {
   const { db } = await makeStore(); t.after(() => db.close());
   await import('../tgcloud/schema.js');
-  assert.equal(tables.length, 3);
+  assert.equal(tables.length, 4);
   for (const table of tables) {
     const actual = await db.all(`PRAGMA table_info(${table.name})`);
     assert.deepEqual(actual.map(({ name, type }) => ({ name, type })), Object.values(table.columns).map(({ name, type }) => ({ name, type })));
