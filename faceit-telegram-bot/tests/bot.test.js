@@ -91,7 +91,7 @@ test('access fails closed for nonmembers, bot senders, forbidden chat and member
   assert.equal((await failing.db.all('SELECT * FROM deliveries')).length, 0);
 });
 
-test('each FACEIT command requires an explicit nickname and wrong bot mentions are ignored', async (t) => {
+test('unbound FACEIT commands request a nickname and wrong bot mentions are ignored', async (t) => {
   const bot = await makeHarness(t);
   await bot.send('/last PlayerOne');
   await bot.send('/last');
@@ -104,7 +104,7 @@ test('each FACEIT command requires an explicit nickname and wrong bot mentions a
   assert.deepEqual(bot.starts, [{ nickname: 'PlayerOne', kind: 'last' }]);
   await bot.click('hint:stats');
   assert.equal(bot.renderedReports.at(-1).kind, 'notice');
-  assert.match(bot.renderedReports.at(-1).message, /Ник нужен в каждой команде/);
+  assert.match(bot.renderedReports.at(-1).message, /Сначала сохраните свой ник: \/setfaceit/);
   assert.ok(!(await bot.db.all("SELECT name FROM sqlite_master WHERE type='table'"))
     .some((row) => /roster|players|identities/.test(row.name)));
 });

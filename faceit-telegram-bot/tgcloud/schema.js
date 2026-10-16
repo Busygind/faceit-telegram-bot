@@ -1,4 +1,4 @@
-import { table, integer, text, index } from 'sdk/db';
+import { table, integer, text, index, uniqueIndex } from 'sdk/db';
 
 export const chatSettings = table('chat_settings', {
   chatId: integer('chat_id').primaryKey(),
@@ -29,3 +29,12 @@ export const reportJobs = table('report_jobs', {
   leaseUntil: integer('lease_until').notNull().default(0),
   updatedAt: integer('updated_at').notNull(),
 }, (t) => ({ updated: index('idx_jobs_updated').on(t.updatedAt) }));
+
+// sdk/db documents uniqueIndex rather than a table-level composite primary key.
+export const playerLinks = table('player_links', {
+  chatId: integer('chat_id').notNull(),
+  userId: integer('user_id').notNull(),
+  playerId: text('player_id').notNull(),
+  nickname: text('nickname').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+}, (t) => ({ owner: uniqueIndex('idx_player_links_chat_user').on(t.chatId, t.userId) }));

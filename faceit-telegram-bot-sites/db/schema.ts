@@ -1,4 +1,4 @@
-import { integer, text, sqliteTable, index } from 'drizzle-orm/sqlite-core';
+import { integer, text, sqliteTable, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
 export const chatSettings = sqliteTable('chat_settings', {
   chat_id: integer('chat_id').primaryKey(), origin_chat_id: integer('origin_chat_id').notNull(),
   ciphertext: text('ciphertext'), version: integer('version').notNull().default(0), updated_at: integer('updated_at').notNull(),
@@ -16,3 +16,7 @@ export const reportCache = sqliteTable('report_cache', {
   cache_key: text('cache_key').primaryKey(), scope_hash: text('scope_hash').notNull(), kind: text('kind').notNull(),
   report_json: text('report_json').notNull(), file_id: text('file_id'), created_at: integer('created_at').notNull(), expires_at: integer('expires_at').notNull(),
 }, table => [index('idx_report_cache_expiry').on(table.expires_at)]);
+export const playerLinks = sqliteTable('player_links', {
+  chat_id: integer('chat_id').notNull(), user_id: integer('user_id').notNull(),
+  player_id: text('player_id').notNull(), nickname: text('nickname').notNull(), updated_at: integer('updated_at').notNull(),
+}, table => [uniqueIndex('idx_player_links_chat_user').on(table.chat_id, table.user_id)]);

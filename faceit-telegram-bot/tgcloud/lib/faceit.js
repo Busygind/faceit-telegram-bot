@@ -311,16 +311,21 @@ export function createFaceitService({ fetch, key, now = () => Math.floor(Date.no
     try { return await response.json(); } catch { throw new FaceitError('FACEIT_INVALID_RESPONSE'); }
   }
 
-  async function start(nickname, kind) {
+  async function start(nickname, kind, { playerId } = {}) {
     if (kind !== 'last' && kind !== 'stats') throw new FaceitError('INVALID_REPORT_KIND');
     const nick = typeof nickname === 'string' ? nickname.trim() : '';
     if (!nick || nick.length > 64 || /[\s\u0000-\u001f\u007f]/.test(nick)) throw new FaceitError('INVALID_NICKNAME');
+    const bound = playerId !== undefined;
+    if (bound && (typeof playerId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(playerId))) throw new FaceitError('INVALID_PLAYER_ID');
     let player;
-    try { player = await get('/players', { nickname: nick }); } catch (error) {
+    // A personal binding follows the immutable FACEIT id, not a nickname that
+    // another account could later reuse. Explicit nick requests use the old path.
+    try { player = bound ? await get(`/players/${encodeURIComponent(playerId)}`) : await get('/players', { nickname: nick }); } catch (error) {
       if (error.code === 'FACEIT_NOT_FOUND') throw new FaceitError('PLAYER_NOT_FOUND');
       throw error;
     }
     if (!player?.player_id || typeof player.player_id !== 'string' || !text(player.player_id)) throw new FaceitError('FACEIT_INVALID_RESPONSE');
+    if (bound && player.player_id !== playerId) throw new FaceitError('FACEIT_INVALID_RESPONSE');
     if (!player.games?.cs2) throw new FaceitError('PLAYER_NO_CS2');
     const to = Math.max(0, Math.floor(now()));
     const from = Math.max(0, to - WINDOW_SECONDS);
