@@ -239,3 +239,70 @@ test('expanded cloud budget still checkpoints and pauses immediately for FACEIT 
  assert.ok(state.retryAt>Math.floor(h.clock()/1000));assert.equal(state.phase,'stats');
  assert.equal(h.sql.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE kind='notice' AND status='sent'").get().n,1);
 });
+
+for (const [label, commandFields, callbackFields, topicId] of [
+ ['ordinary supergroup', {}, {message_thread_id:405}, null],
+ ['General topic', {message_thread_id:1}, {message_thread_id:405}, null],
+ ['forum topic', {message_thread_id:77,is_topic_message:true}, {message_thread_id:77,is_topic_message:true}, 77],
+]) test(`cloud stats continues the same 10/30 checkpoint after 429 in ${label}`,async t=>{
+ const {sql,binding}=database(t);let clock=1800000000000;let rateLimited=false;let profileReads=0;let historyReads=0;
+ const photos=[];let messageId=100;
+ const user={id:123,is_bot:false};const chat={id:CHAT,type:'supergroup'};
+ const matches=Array.from({length:30},(_,i)=>({
+  match_id:`resume-${i}`,game_id:'cs2',status:'FINISHED',finished_at:clock/1000-1000-i*86400,
+  teams:{faction1:{faction_id:'a',name:'Own',roster:[{player_id:'p',nickname:'Player'}]},
+   faction2:{faction_id:'b',name:'Other',roster:[{player_id:'q',nickname:'Other'}]}},
+  results:{winner:'faction1',score:{faction1:1,faction2:0}},
+ }));
+ const transport=async(url,options)=>{
+  const target=new URL(url);
+  if(target.origin==='https://api.telegram.org'){
+   const method=target.pathname.split('/').at(-1);
+   if(method==='getChatMember')return Response.json({ok:true,result:{status:'member'}});
+   if(method==='answerCallbackQuery')return Response.json({ok:true,result:true});
+   assert.equal(method,'sendPhoto');assert.ok(options.body instanceof FormData);
+   assert.equal(options.body.get('message_thread_id'),topicId===null?null:String(topicId));
+   const message={message_id:++messageId,chat,...callbackFields};
+   photos.push({message,keyboard:JSON.parse(options.body.get('reply_markup'))});
+   return Response.json({ok:true,result:message});
+  }
+  assert.equal(target.origin,'https://open.faceit.com');
+  if(target.pathname.endsWith('/players')){
+   profileReads++;
+   return Response.json({player_id:'p',nickname:'Player',games:{cs2:{faceit_elo:1710,skill_level:8}}});
+  }
+  if(target.pathname.endsWith('/history')){historyReads++;return Response.json({items:matches});}
+  const match=matches.find(item=>target.pathname===`/data/v4/matches/${item.match_id}`
+   || target.pathname===`/data/v4/matches/${item.match_id}/stats`);
+  assert.ok(match);
+  if(!target.pathname.endsWith('/stats'))return Response.json(match);
+  if(match.match_id==='resume-10'&&!rateLimited){
+   rateLimited=true;return Response.json({}, {status:429,headers:{'retry-after':'3'}});
+  }
+  return Response.json({rounds:[{match_id:match.match_id,game_id:'cs2',match_round:1,
+   round_stats:{Map:'de_inferno',Rounds:'21',Winner:'a'},teams:[
+    {team_id:'a',team_stats:{'Final Score':'13'},players:[{player_id:'p',nickname:'Player',player_stats:{Kills:'20',Deaths:'11',Assists:'5',Headshots:'5','Total Damage':'2100'}}]},
+    {team_id:'b',team_stats:{'Final Score':'8'},players:[{player_id:'q',nickname:'Other',player_stats:{Kills:'11',Deaths:'20',Assists:'1'}}]},
+   ]}]});
+ };
+ // Recreate both the runtime and fetch facade on every invocation, retaining only D1.
+ const invoke=update=>createCloudRuntime({...configuration,DB:binding},{
+  fetch:(...args)=>transport(...args),now:()=>clock,onDiagnostic:()=>{},onMetrics:()=>{},onCacheEvent:()=>{},
+ })(update);
+ await invoke({update_id:1001,message:{message_id:1,chat,from:user,text:'/stats Player',...commandFields}});
+ const pending=sql.prepare('SELECT job_id,status,state,topic_id FROM report_jobs').get();
+ assert.equal(pending.status,'pending');assert.equal(pending.topic_id,topicId);
+ const state=JSON.parse(pending.state);assert.equal(state.matches.length,10);assert.equal(state.retryAt,clock/1000+3);
+ const prompt=photos.at(-1);const data=prompt.keyboard.inline_keyboard[0][0].callback_data;
+ assert.equal(data,`continue:${pending.job_id}`);
+ clock+=4000;
+ const callback={id:'resume-query',data,from:user,message:prompt.message};
+ await invoke({update_id:1002,callback_query:callback});
+ const ready=sql.prepare('SELECT job_id,status,state FROM report_jobs').get();
+ assert.equal(ready.job_id,pending.job_id);assert.equal(ready.status,'ready');
+ assert.equal(JSON.parse(ready.state).matches.length,30);assert.equal(profileReads,1);assert.equal(historyReads,1);
+ assert.equal(photos.length,2);
+ assert.ok(photos.at(-1).keyboard.inline_keyboard.flat().every(button=>!button.callback_data?.startsWith('continue:')));
+ await invoke({update_id:1003,callback_query:{...callback,id:'repeat-query'}});
+ assert.equal(photos.length,2,'a repeated click cannot duplicate the completed report');
+});

@@ -64,7 +64,7 @@ export async function makeHarness(t, options = {}) {
     message_id: updateId,
     chat: { id: configuration.chatId ?? -10, type: configuration.chatType ?? 'supergroup' },
     from: { id: configuration.userId ?? 1, is_bot: false },
-    ...(configuration.topicId == null ? {} : { message_thread_id: configuration.topicId }),
+    ...(configuration.topicId == null ? {} : { message_thread_id: configuration.topicId, is_topic_message: true }),
     text, ...configuration.messageFields,
   });
   return {

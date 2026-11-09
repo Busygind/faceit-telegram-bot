@@ -245,6 +245,39 @@ test('continuation is persisted across bot invocations and bound to its chat and
   assert.equal(bot.sent().length, 0);
 });
 
+for (const [label, chatType, commandFields, callbackFields] of [
+  ['ordinary group', 'group', {}, { message_thread_id: 405 }],
+  ['supergroup without topics', 'supergroup', {}, { message_thread_id: 405 }],
+  ['reply outside a forum topic', 'supergroup', { message_thread_id: 123 }, { message_thread_id: 405 }],
+  ['General topic', 'supergroup', { message_thread_id: 1 }, { message_thread_id: 405 }],
+  ['explicit non-topic message', 'supergroup', { message_thread_id: 123, is_topic_message: false }, { message_thread_id: 405, is_topic_message: false }],
+]) test(`stats resumes after Retry-After in ${label} despite unrelated thread IDs`, async t => {
+  let clock = 1800000000;
+  const bot = await makeHarness(t, {
+    now: () => clock,
+    faceitOverrides: {
+      start: (nickname, kind) => ({ nickname, kind, phase: 'details', matches: [], selected: Array(30).fill({}) }),
+      advance: state => state.matches.length === 0
+        ? { done: false, state: { ...state, matches: Array(10).fill({}), retryAt: clock + 3 }, progress: { retryAt: clock + 3 } }
+        : { done: true, state: { ...state, phase: 'done' }, report: fixtureReport(state.kind, state.nickname) },
+    },
+  });
+  await bot.send('/stats ExplicitNick', { chatType, messageFields: commandFields });
+  const job = await bot.db.get('SELECT * FROM report_jobs');
+  assert.equal(job.topic_id, null);
+  assert.equal(JSON.parse(job.state).matches.length, 10);
+  assert.match(bot.renderedReports.at(-1).message, /подождать ещё 3 сек/);
+  const continuation = bot.sent('sendPhoto').at(-1).reply_markup.inline_keyboard[0][0].callback_data;
+  clock += 4;
+  bot.restart();
+  await bot.click(continuation, { chatType, messageFields: callbackFields });
+  assert.equal(bot.starts.length, 1, 'resume the saved job without starting another profile request');
+  assert.equal(bot.advances.length, 2);
+  assert.equal((await bot.store.getJob(job.job_id)).status, 'ready');
+  assert.equal(bot.renderedReports.at(-1).kind, 'stats');
+  assert.ok(bot.sent('sendPhoto').every(photo => !Object.hasOwn(photo, 'message_thread_id')));
+});
+
 test('ready checkpoint resumes an interrupted delivery without retrying a claimed photo', async (t) => {
   const bot = await makeHarness(t, { renderCard: () => new Uint8Array([1, 2, 3]) });
   await bot.store.createJob('ready-fixture', -10, 7, { kind: 'stats', nickname: 'RecoveredNick', phase: 'done' });
