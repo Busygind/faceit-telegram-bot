@@ -1,5 +1,5 @@
-import { parseTeamspeak } from './teamspeak.js';
-import { todayPoll } from './poll.js';
+import { displayTeamspeakAddress, parseTeamspeak } from './teamspeak.js';
+import { createPollService } from './poll-service.js';
 import { HELP, TS_HELP, FACEIT_HELP } from './text.js';
 
 const COMMANDS = [
@@ -20,10 +20,13 @@ function command(text) {
   return match ? { name: match[1].toLowerCase(), bot: match[2]?.toLowerCase(), args: match[3] ?? '' } : null;
 }
 function context(message) {
-  return { chatId: message.chat.id, topicId: message.message_thread_id ?? null };
+  return { chatId: message.chat.id, topicId: message.message_thread_id ?? null,
+    replyToMessageId: Number.isSafeInteger(message.message_id) && message.message_id > 0 ? message.message_id : null };
 }
 function destination(ctx) {
-  return { chat_id: ctx.chatId, ...(ctx.topicId == null ? {} : { message_thread_id: ctx.topicId }) };
+  return { chat_id: ctx.chatId, ...(ctx.topicId == null ? {} : { message_thread_id: ctx.topicId }),
+    ...(Number.isSafeInteger(ctx.replyToMessageId) && ctx.replyToMessageId > 0
+      ? { reply_parameters: { message_id: ctx.replyToMessageId, allow_sending_without_reply: true } } : {}) };
 }
 function knownFailure(error) { return Number.isInteger(error?.code) && error.code >= 400 && error.code < 500; }
 function boundedInteger(value, fallback, maximum) {
@@ -37,6 +40,7 @@ function personalMessage(message) {
 function validNickname(value) { return typeof value === 'string' && value.length > 0 && value.length <= 64 && !/[\s@\u0000-\u001f\u007f]/.test(value); }
 function safeError(error) {
   switch (error?.code) {
+    case 'FACEIT_DEADLINE': return 'FACEIT не ответил за отведённое время. Попробуйте команду ещё раз позже.';
     case 'INVALID_NICKNAME': return 'Укажите один ник FACEIT без @ и пробелов: /setfaceit ник, /last ник или /stats ник.';
     case 'PLAYER_NOT_FOUND': case 'FACEIT_NOT_FOUND': return 'Игрок FACEIT не найден. Проверьте ник.';
     case 'PLAYER_NO_CS2': case 'NO_CS2': case 'FACEIT_NO_CS2': return 'У этого игрока нет профиля FACEIT CS2.';
@@ -48,16 +52,16 @@ function safeError(error) {
   }
 }
 
-export function createBot({ api, store, faceit, sealer, settings, renderCard, inputFile, reportCache, shouldContinue, now = () => Math.floor(Date.now() / 1000) }) {
+export function createBot({ api, store, faceit, sealer, settings, renderCard, inputFile, reportCache, shouldContinue, waitUntil, now = () => Math.floor(Date.now() / 1000) }) {
   // Optional invocation-scoped budget. It is never serialized into a checkpoint.
   const canContinue = () => typeof shouldContinue !== 'function' || shouldContinue();
-  const requestBudget = typeof shouldContinue === 'function' ? { shouldContinue } : {};
+  const polls = createPollService({ api, store, now });
   let me;
   const getMe = async () => me ?? (me = await api.getMe());
   const say = (ctx, text, keyboard = MENU) => api.sendMessage({ ...destination(ctx), text, ...(keyboard ? { reply_markup: keyboard } : {}) });
 
-  async function access(ctx, user, admin = false) {
-    if (!user || user.is_bot || !(await store.allowed(ctx.chatId))) return false;
+  async function chatMember(ctx, user, admin = false) {
+    if (!user || user.is_bot) return false;
     try {
       const member = await api.getChatMember({ chat_id: ctx.chatId, user_id: user.id });
       return admin ? ['creator', 'administrator'].includes(member.status)
@@ -66,28 +70,70 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
     } catch { return false; } // Fail closed, including when bot lacks admin visibility.
   }
 
+  async function access(ctx, user, admin = false) {
+    return Boolean(user && !user.is_bot && await store.allowed(ctx.chatId) && await chatMember(ctx, user, admin));
+  }
+
+  async function maintainStore() {
+    // Keep retention bounded without putting maintenance on the reply's critical path.
+    // Still awaited before the update is acknowledged; failures must not send a second reply.
+    try { await store.cleanup(); } catch { /* Maintenance is best effort, not a delivery failure. */ }
+  }
+
   async function claim(updateId, ctx, kind) {
     if (!Number.isSafeInteger(updateId)) return false;
     return store.claimDelivery(`u:${updateId}`, ctx.chatId, ctx.topicId, kind);
   }
 
   async function poll(ctx, requestId) {
-    try {
-      const message = await api.sendPoll(todayPoll(ctx.chatId, ctx.topicId));
-      await store.finishDelivery(requestId, 'sent', message);
-    } catch (error) {
-      await store.finishDelivery(requestId, knownFailure(error) ? 'rejected' : 'outcome_unknown');
-      await say(ctx, knownFailure(error)
-        ? 'Не удалось создать опрос. Проверьте право бота отправлять опросы; при flood limit подождите и вызовите /poll заново.'
-        : 'Ответ об отправке опроса потерян. Возможно, он уже создан — проверьте чат. Автоматически повторять не буду.');
-    }
+    let result;
+    try { result = await polls.run(ctx, requestId); }
+    catch { result = { status: 'outcome_unknown' }; }
+    try { await store.finishDelivery(requestId, result.status === 'busy' ? 'rejected' : result.status, result.message); }
+    catch { /* The original update claim prevents blindly repeating an uncertain send. */ }
+    if (result.warning) return say(ctx, result.warning);
+    if (result.status === 'sent') return;
+    if (result.status === 'busy') return say(ctx, 'Опрос уже обрабатывается. Подождите немного и вызовите /poll снова.');
+    return say(ctx, result.status === 'rejected'
+      ? 'Не удалось создать опрос или переслать предыдущий. Проверьте права отправлять опросы и закреплять сообщения; при flood limit подождите.'
+      : 'Ответ об отправке опроса потерян. Возможно, он уже создан — проверьте чат. До конца текущего периода МСК не буду создавать дубликат.');
   }
 
-  const continueKeyboard = (jobId) => ({ inline_keyboard: [
-    [{ text: 'Продолжить', callback_data: `continue:${jobId}` }], [{ text: 'Меню', callback_data: 'help' }],
-  ] });
-  const noticeReport = (title, message, nickname) => ({ kind: 'notice', title, message,
-    ...(nickname ? { nickname } : {}), updatedAt: now() });
+  function executionBudget() {
+    const deadline = now() + boundedInteger(settings.autoAdvanceSeconds, 90, 120);
+    const active = () => canContinue() && now() < deadline;
+    return { active, async wait(retryAt) {
+      if (!Number.isFinite(retryAt) || retryAt >= deadline || !active()) return false;
+      if (retryAt <= now()) return true;
+      if (typeof waitUntil !== 'function') return false;
+      try { return await waitUntil(retryAt) === true && now() >= retryAt && active(); }
+      catch { return false; }
+    } };
+  }
+  const deadlineError = () => Object.assign(new Error('FACEIT_DEADLINE'), { code: 'FACEIT_DEADLINE' });
+
+  async function startReport(nickname, kind, options, budget) {
+    const attempts = boundedInteger(settings.autoAdvanceBatches, 32, 32);
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (!budget.active()) throw deadlineError();
+      try { return await faceit.start(nickname, kind, options); }
+      catch (error) {
+        if (!Number.isFinite(error?.retryAt)) throw error;
+        if (!(await budget.wait(error.retryAt))) throw deadlineError();
+      }
+    }
+    throw deadlineError();
+  }
+
+  async function failure(ctx, requestId, title, text) {
+    const id = `notice:${requestId}`; // Preserve existing delivery tombstones.
+    if (!(await store.claimDelivery(id, ctx.chatId, ctx.topicId, 'error'))) return;
+    let status = 'rejected';
+    let message;
+    try { message = await say(ctx, `${title}\n${text}`, null); status = 'sent'; }
+    catch (error) { status = knownFailure(error) ? 'rejected' : 'outcome_unknown'; }
+    try { await store.finishDelivery(id, status, message); } catch { /* Never repeat an uncertain POST. */ }
+  }
 
   function validFileId(value) { return typeof value === 'string' && /^[A-Za-z0-9_-]{1,1024}$/.test(value); }
   function largestFileId(message) {
@@ -105,7 +151,7 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
   async function deliverImage(ctx, requestId, report, filename, keyboard, { fileId, beforeSend, afterSend } = {}) {
     // Claim before rendering/POST. One definitely invalid cached file ID may
     // fall back to bytes under this same claim; ambiguous sends never retry.
-    if (!(await store.claimDelivery(requestId, ctx.chatId, ctx.topicId, report.kind === 'notice' ? 'notice' : 'photo'))) return;
+    if (!(await store.claimDelivery(requestId, ctx.chatId, ctx.topicId, 'photo'))) return;
     try { await beforeSend?.(); } catch { /* A cache is an optional optimization. */ }
     let status = 'rejected';
     let message;
@@ -124,18 +170,11 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
     }
     if (needsBytes) {
       let bytes;
-      let renderedReport = false;
-      try { bytes = renderCard(report); renderedReport = Boolean(bytes); } catch { /* Try one image-only error notice below. */ }
-      if (!bytes && report.kind !== 'notice') {
-        try {
-          bytes = renderCard(noticeReport('Карточка недоступна', 'Не удалось создать карточку. Попробуйте новой командой позже.', report.nickname));
-          filename = 'faceit-status.png';
-        } catch { /* Never fall back to plain-text FACEIT output. */ }
-      }
+      try { bytes = renderCard(report); } catch { /* Rendering failed before any upload; a final text refusal is safe. */ }
       if (bytes) {
         try {
           message = await api.sendPhoto({ ...destination(ctx), photo: inputFile(bytes, filename), reply_markup: keyboard });
-          status = 'sent'; reportSent = renderedReport;
+          status = 'sent'; reportSent = true;
         } catch (error) { status = knownFailure(error) ? 'rejected' : 'outcome_unknown'; }
       }
     }
@@ -144,10 +183,10 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
     }
     // The original claim remains an at-most-once tombstone if persistence fails.
     try { await store.finishDelivery(requestId, status, message); } catch { /* Keep the original claim. */ }
+    // Only a definite rejection or a pre-POST render failure permits a text
+    // fallback. An unknown photo POST may already have reached the chat.
+    if (status === 'rejected') return failure(ctx, `delivery:${requestId}`, 'Карточка недоступна', 'Не удалось отправить карточку. Попробуйте команду ещё раз позже.');
   }
-
-  const notice = (ctx, requestId, title, message, keyboard = MENU, nickname) =>
-    deliverImage(ctx, `notice:${requestId}`, noticeReport(title, message, nickname), 'faceit-status.png', keyboard);
 
   async function reportDelivery(ctx, jobId, report, state, cached = null) {
     const matchUrl = report.match?.url ?? report.matches?.[0]?.url;
@@ -173,58 +212,60 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
     try {
       const cached = await reportCache.get(state);
       if (cached?.report?.kind !== state.kind) return null;
-      return { report: cached.report, fileId: validFileId(cached.fileId) ? cached.fileId : null };
+      return { report: cached.report, fileId: validFileId(cached.fileId) ? cached.fileId : null,
+        rendererScope: reportCache.rendererScope };
     } catch { return null; } // A failed cache cannot prevent a fresh report.
   }
 
-  async function advanceJob(ctx, jobId, requestId) {
-    // Serverless keeps one bounded batch per invocation. A long-lived local
-    // runner may await several batches, persisting a checkpoint after each one.
-    const batches = boundedInteger(settings.autoAdvanceBatches, 1, 32);
-    const deadline = now() + boundedInteger(settings.autoAdvanceSeconds, 90, 120);
-    const densityWarning = () => notice(ctx, requestId, 'История слишком плотная', 'Не могу надёжно определить последние завершённые матчи: история слишком плотная даже после разделения по секундам. Неполную выборку не выдаю за полную. Этот запрос остановлен; повторное нажатие не поможет.');
-    const continuation = (state, progress) => {
-      const retry = progress?.retryAt ?? state.retryAt;
-      const waiting = retry && retry > now() ? ` FACEIT просит подождать ещё ${retry - now()} сек.` : '';
-      const timedOut = !canContinue() || now() >= deadline;
-      const reason = timedOut && !waiting ? 'Загрузка FACEIT не уложилась в безопасное время одного запроса' : progress?.message ?? 'Загружаю историю и статистику';
-      const loaded = state.selected?.length ? `Загружено ${state.matches?.length ?? 0} из ${state.selected.length} матчей.\n` : '';
-      return notice(ctx, requestId, 'Сохранила прогресс', `${reason}.${waiting}\n${loaded}Нажмите «Продолжить». Повторять ник не нужно.`, continueKeyboard(jobId), state.profile?.nickname ?? state.nickname);
-    };
-    let progress;
+  async function advanceJob(ctx, jobId, requestId, budget = executionBudget()) {
+    const batches = boundedInteger(settings.autoAdvanceBatches, 32, 32);
+    const timedOut = () => failure(ctx, requestId, 'Не удалось получить статистику', safeError(deadlineError()));
+    const densityWarning = () => failure(ctx, requestId, 'История слишком плотная', 'Не могу надёжно определить последние завершённые матчи. Неполную выборку не выдаю за полную. Попробуйте позже.');
     for (let batch = 0; batch < batches; batch++) {
       const job = await store.getJob(jobId);
-      if (!job || job.chat_id !== ctx.chatId || job.topic_id !== ctx.topicId) return notice(ctx, requestId, 'Запрос недоступен', 'Этот запрос недоступен в текущем чате/теме. Отправьте /stats ник заново.');
+      if (!job || job.chat_id !== ctx.chatId || job.topic_id !== ctx.topicId) return failure(ctx, requestId, 'Запрос недоступен', 'Этот запрос недоступен в текущем чате/теме. Отправьте /stats ник заново.');
+      if (Number.isSafeInteger(job.state.replyToMessageId) && job.state.replyToMessageId > 0) {
+        ctx = { ...ctx, replyToMessageId: job.state.replyToMessageId };
+      }
       if (job.status === 'blocked') return densityWarning();
-      // A ready checkpoint can survive a crash before/during delivery. The
-      // service rebuilds it without HTTP; delivery tombstones prevent repeats.
+      // A ready checkpoint needs no new FACEIT reads. Keep photo tombstones,
+      // renderer scope and original command anchors when old buttons are used.
       if (job.status === 'ready') {
         if (job.state.cachedReport) {
           const stale = now() - job.state.cachedReport.updatedAt > 300;
           const report = { ...job.state.cachedReport, stale };
-          return reportDelivery(ctx, jobId, report, job.state, { fileId: stale ? null : job.state.cachedFileId });
+          const sameRenderer = typeof reportCache?.rendererScope === 'string'
+            && job.state.cachedRendererScope === reportCache.rendererScope;
+          return reportDelivery(ctx, jobId, report, job.state, { fileId: stale || !sameRenderer ? null : job.state.cachedFileId });
         }
-        const result = await faceit.advance(job.state, { maxRequests: settings.maxRequests, ...requestBudget });
+        let result;
+        try { result = await faceit.advance(job.state, { maxRequests: settings.maxRequests, shouldContinue: budget.active }); }
+        catch (error) { return failure(ctx, requestId, 'Не удалось выполнить запрос', safeError(error)); }
         if (result.done) return reportDelivery(ctx, jobId, result.report, result.state);
-        return notice(ctx, requestId, 'Запрос недоступен', 'Сохранённый отчёт повреждён. Отправьте /stats ник или /last ник заново.');
+        return failure(ctx, requestId, 'Запрос недоступен', 'Сохранённый отчёт повреждён. Отправьте /stats ник или /last ник заново.');
       }
-      if ((job.state.retryAt && job.state.retryAt > now()) || !canContinue() || (batch > 0 && now() >= deadline)) {
-        return continuation(job.state, progress);
+      if (!budget.active()) return timedOut();
+      if (job.state.retryAt && job.state.retryAt > now()) {
+        // saveJob releases the lease before this passive wait. Re-read/lease
+        // afterward: another legacy button may have advanced the checkpoint.
+        if (!(await budget.wait(job.state.retryAt))) return timedOut();
+        continue;
       }
-      if (!(await store.leaseJob(jobId, job.version))) return notice(ctx, requestId, 'Запрос уже обрабатывается', 'Если выполнение прервалось, подождите две минуты и нажмите ещё раз.', continueKeyboard(jobId));
+      if (!(await store.leaseJob(jobId, job.version))) return failure(ctx, requestId, 'Запрос уже обрабатывается', 'Отправьте команду ещё раз позже.');
       let result;
       try {
         const historyOnly = Boolean(reportCache && !job.state.cacheChecked && job.state.phase === 'history');
-        result = await faceit.advance(job.state, { maxRequests: settings.maxRequests, ...requestBudget, ...(historyOnly ? { historyOnly: true } : {}) });
+        result = await faceit.advance(job.state, { maxRequests: settings.maxRequests, shouldContinue: budget.active, ...(historyOnly ? { historyOnly: true } : {}) });
       }
       catch (error) {
         await store.saveJob(jobId, job.version, job.state, 'pending');
-        throw error;
+        return failure(ctx, requestId, 'Не удалось выполнить запрос', safeError(error));
       }
       const cached = await cachedReport(result.state);
       if (cached) {
         result.state.cachedReport = cached.report;
         result.state.cachedFileId = cached.fileId;
+        result.state.cachedRendererScope = cached.rendererScope;
         await store.saveJob(jobId, job.version, result.state, 'ready');
         return reportDelivery(ctx, jobId, cached.report, result.state, cached);
       }
@@ -233,10 +274,8 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
       await store.saveJob(jobId, job.version, result.state, blocked ? 'blocked' : result.done ? 'ready' : 'pending');
       if (blocked) return densityWarning();
       if (result.done) return reportDelivery(ctx, jobId, result.report, result.state);
-      progress = result.progress;
-      const retry = progress?.retryAt ?? result.state.retryAt;
-      if (batch + 1 >= batches || now() >= deadline || !canContinue() || (retry && retry > now())) return continuation(result.state, progress);
     }
+    return timedOut();
   }
 
   async function action(name, args, ctx, user, message, updateId) {
@@ -267,7 +306,7 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
     }
     if (name === 'setup') {
       const admin = await access(ctx, user, true);
-      return say(ctx, `Чат: ${ctx.chatId}\nДоступ к боту: включён. Ваши права: ${admin ? 'администратор' : 'участник'}.\nБот должен быть администратором, чтобы проверять членство и удалять команды с паролем. Нужны права отправлять сообщения, фото и опросы.\n\n${TS_HELP}`);
+      return say(ctx, `Чат: ${ctx.chatId}\nДоступ к боту: включён. Ваши права: ${admin ? 'администратор' : 'участник'}.\nБот должен быть администратором, чтобы проверять членство и удалять команды с паролем. Нужны права отправлять сообщения, фото и опросы, а также закреплять сообщения.\n\n${TS_HELP}`);
     }
     if (name === 'poll') {
       if (args.trim()) return say(ctx, 'Опрос запускается командой /poll без аргументов.');
@@ -278,7 +317,7 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
       const row = await store.getSettings(ctx.chatId);
       if (!row?.ciphertext) return say(ctx, `В этом чате TeamSpeak ещё не настроен.\n${TS_HELP}`);
       const credentials = sealer.open(ctx.chatId, row.ciphertext);
-      return say(ctx, `TeamSpeak этого чата\nАдрес: ${credentials.host}\nПароль: ${credentials.password || '(без пароля)'}`);
+      return say(ctx, `TeamSpeak этого чата\nАдрес: ${displayTeamspeakAddress(credentials.host)}\nПароль: ${credentials.password || '(без пароля)'}`);
     }
     if (name === 'setts') {
       if (!message || message.sender_chat || message.forward_origin || message.forward_from || message.forward_date || message.is_automatic_forward) {
@@ -290,27 +329,30 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
       await store.saveSettings(ctx.chatId, credentials, sealer);
       let deleted = false;
       try { await api.deleteMessage({ chat_id: ctx.chatId, message_id: message.message_id }); deleted = true; } catch { /* Save stays committed. */ }
-      return say(ctx, `TeamSpeak для этого чата обновлён.${deleted ? '' : '\nНе удалось удалить команду с реквизитами: удалите её вручную.'}`);
+      return say(deleted ? { ...ctx, replyToMessageId: null } : ctx, `TeamSpeak для этого чата обновлён.${deleted ? '' : '\nНе удалось удалить команду с реквизитами: удалите её вручную.'}`);
     }
     if (name === 'last' || name === 'stats') {
+      const budget = executionBudget();
       const nickname = args.trim();
-      if (nickname && !validNickname(nickname)) return notice(ctx, requestId, 'Укажите ник FACEIT', `Укажите один ник FACEIT без @ и пробелов: /${name} ник. Либо сохраните свой: /setfaceit ник.`);
+      if (nickname && !validNickname(nickname)) return failure(ctx, requestId, 'Укажите ник FACEIT', `Укажите один ник FACEIT без @ и пробелов: /${name} ник. Либо сохраните свой: /setfaceit ник.`);
       let link = null;
       if (!nickname) {
-        if (message?.sender_chat) return notice(ctx, requestId, 'Нужен ваш аккаунт', 'Отправьте команду от своего аккаунта, чтобы получить личную статистику, либо укажите ник явно.');
+        if (message?.sender_chat) return failure(ctx, requestId, 'Нужен ваш аккаунт', 'Отправьте команду от своего аккаунта, чтобы получить личную статистику, либо укажите ник явно.');
         link = await store.getPlayerLink(ctx.chatId, user.id);
-        if (!link) return notice(ctx, requestId, 'Укажите ваш FACEIT', `Сначала сохраните свой ник: /setfaceit ник. Или запросите любого игрока: /${name} ник.`);
+        if (!link) return failure(ctx, requestId, 'Укажите ваш FACEIT', `Сначала сохраните свой ник: /setfaceit ник. Или запросите любого игрока: /${name} ник.`);
       }
-      let state = await faceit.start(nickname || link.nickname, name, ...(link ? [{ playerId: link.player_id }] : []));
+      let state = await startReport(nickname || link.nickname, name, link ? { playerId: link.player_id } : undefined, budget);
+      // Persist the command anchor across resumable FACEIT checkpoints.
+      if (ctx.replyToMessageId != null) state.replyToMessageId = ctx.replyToMessageId;
       const jobId = `${(-ctx.chatId).toString(36)}_${updateId.toString(36)}`;
-      if (reportCache) {
-        const history = await faceit.advance(state, { maxRequests: settings.maxRequests, ...requestBudget, historyOnly: true });
+      if (reportCache && budget.active()) {
+        const history = await faceit.advance(state, { maxRequests: settings.maxRequests, shouldContinue: budget.active, historyOnly: true });
         state = history.state;
         const cached = await cachedReport(state);
         if (cached) return reportDelivery(ctx, jobId, cached.report, state, cached);
       }
       await store.createJob(jobId, ctx.chatId, ctx.topicId, state);
-      return advanceJob(ctx, jobId, requestId);
+      return advanceJob(ctx, jobId, requestId, budget);
     }
     return say(ctx, 'Такой команды нет. Используйте /menu.');
   }
@@ -338,26 +380,27 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
     const faceitCommand = cmd.name === 'last' || cmd.name === 'stats';
     if (!['group', 'supergroup'].includes(message.chat.type)) {
       if (faceitCommand) {
-        if (await claim(updateId, ctx, cmd.name)) return notice(ctx, `u:${updateId}`, 'Нужна группа', 'Добавьте меня в группу и отправьте /menu. FACEIT команды доступны только в группе.');
+        if (await claim(updateId, ctx, cmd.name)) return failure(ctx, `u:${updateId}`, 'Нужна группа', 'Добавьте меня в группу и отправьте /menu. FACEIT команды доступны только в группе.');
         return;
       }
       return say(ctx, 'Добавьте меня в группу и отправьте /menu. TeamSpeak, опросы и FACEIT команды доступны только в группе.');
     }
     if (!(await store.allowed(ctx.chatId))) return;
-    if (!(await access(ctx, message.from))) {
+    if (!(await chatMember(ctx, message.from))) {
       if (faceitCommand) {
-        if (await claim(updateId, ctx, cmd.name)) return notice(ctx, `u:${updateId}`, 'Нет доступа', 'Не могу подтвердить членство. Выдайте боту права администратора; команды должен отправлять участник от своего аккаунта.');
+        if (await claim(updateId, ctx, cmd.name)) return failure(ctx, `u:${updateId}`, 'Нет доступа', 'Не могу подтвердить членство. Выдайте боту права администратора; команды должен отправлять участник от своего аккаунта.');
         return;
       }
       return say(ctx, 'Не могу подтвердить членство. Выдайте боту права администратора; команды должен отправлять участник от своего аккаунта.');
     }
     if (!(await claim(updateId, ctx, cmd.name))) return;
     try {
-      await store.cleanup();
       await action(cmd.name, cmd.args, ctx, message.from, message, updateId);
     } catch (error) {
-      if (faceitCommand) return notice(ctx, `u:${updateId}`, 'Не удалось выполнить запрос', safeError(error));
+      if (faceitCommand) return await failure(ctx, `u:${updateId}`, 'Не удалось выполнить запрос', safeError(error));
       await say(ctx, safeError(error));
+    } finally {
+      await maintainStore();
     }
   }
 
@@ -370,7 +413,7 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
     const faceitCallback = query.data?.startsWith('continue:') || ['last', 'stats', 'hint:last', 'hint:stats'].includes(query.data);
     if (!(await access(ctx, query.from))) {
       if (faceitCallback && await store.allowed(ctx.chatId) && await claim(updateId, ctx, 'callback')) {
-        return notice(ctx, `u:${updateId}`, 'Нет доступа', 'Не могу подтвердить членство. Команду должен отправить участник этой группы.');
+        return failure(ctx, `u:${updateId}`, 'Нет доступа', 'Не могу подтвердить членство. Команду должен отправить участник этой группы.');
       }
       return;
     }
@@ -382,8 +425,10 @@ export function createBot({ api, store, faceit, sealer, settings, renderCard, in
       if (['help', 'ts', 'poll', 'myfaceit'].includes(query.data)) return await action(query.data, '', ctx, query.from, null, updateId);
       return await say(ctx, 'Кнопка устарела. Используйте /menu.');
     } catch (error) {
-      if (faceitCallback) return notice(ctx, `u:${updateId}`, 'Не удалось выполнить запрос', safeError(error));
-      return say(ctx, safeError(error));
+      if (faceitCallback) return await failure(ctx, `u:${updateId}`, 'Не удалось выполнить запрос', safeError(error));
+      return await say(ctx, safeError(error));
+    } finally {
+      await maintainStore();
     }
   }
   return { handleMessage, handleCallback };

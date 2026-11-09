@@ -37,11 +37,13 @@ test('sendPoll sends the exact public multiple-answer, revotable native poll wit
   await api.sendPoll(todayPoll(-1004393474895, 7));
   assert.deepEqual(sent, {
     chat_id: -1004393474895, message_thread_id: 7, question: 'Играть сегодня (время по МСК)',
-    options: ['да, в 17', 'да, в 18', 'да, в 19', 'да, в 20', 'да, в 21', 'да, в 22', 'да, в 23', 'да, позже', 'нет'].map((text) => ({ text })),
+    options: ['да, в 14', 'да, в 15', 'да, в 16', 'да, в 17', 'да, в 18', 'да, в 19', 'да, в 20', 'да, в 21', 'да, в 22', 'да, в 23', 'да, позже', 'нет'].map((text) => ({ text })),
     type: 'regular', is_anonymous: false, allows_multiple_answers: true, allows_revoting: true,
     shuffle_options: false, allow_adding_options: false, hide_results_until_closes: false,
     is_closed: false, disable_notification: false, protect_content: false, allow_paid_broadcast: false,
   });
+  assert.equal(sent.options.length, 12);
+  assert.ok(!sent.options.some(option => option.text === 'да, в 13'));
 });
 
 test('sendPhoto builds native multipart preserving bytes, caption and JSON keyboard', async () => {

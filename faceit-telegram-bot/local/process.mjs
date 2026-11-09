@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { join, resolve } from 'node:path';
 import { acquireLock, secureDirectory } from './config.mjs';
+import { requestLocalStop } from './shutdown.mjs';
 
 const exec = promisify(execFile);
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -34,7 +35,7 @@ async function inspectOsProcess(pid, root, nodePath) {
 
 /** No pkill, process-name matching, forced kills, or automatic stale-lock removal. */
 export function createLocalProcesses({ root, nodePath = process.execPath, inspectProcess = inspectOsProcess,
-  kill = (pid, signal) => process.kill(pid, signal), sleep = pause } = {}) {
+  kill = (pid, signal) => process.kill(pid, signal), sleep = pause, now = () => performance.now() } = {}) {
   root = resolve(root);
   const folder = join(root, '.local-data');
   const lockFile = join(folder, 'polling.lock');
@@ -58,20 +59,26 @@ export function createLocalProcesses({ root, nodePath = process.execPath, inspec
     if (current.state !== 'running' || JSON.stringify(current.identity) !== JSON.stringify(identity)) {
       throw new Error('SWITCH_PROCESS_CHANGED');
     }
-    try { kill(identity.pid, 'SIGTERM'); } catch { throw new Error('SWITCH_STOP_FAILED'); }
-    for (let elapsed = 0; elapsed < 150_000; elapsed += 100) {
-      await sleep(100);
+    let cleanRequest;
+    try { cleanRequest = await requestLocalStop(root, identity); } catch { throw new Error('SWITCH_STOP_FAILED'); }
+    const deadline = now() + 150_000;
+    const finishStop = async () => {
+      // A vanished process is successful only if the runner released its own
+      // lock. A remaining or replacement lock is never removed on its behalf.
+      const after = await inspect();
+      if (after.state !== 'stopped') throw new Error('SWITCH_PROCESS_CHANGED');
+      await cleanRequest();
+    };
+    while (now() < deadline) {
+      await sleep(Math.min(100, deadline - now()));
+      if (now() >= deadline) break;
       let alive = true;
       try { kill(identity.pid, 0); } catch (error) { if (error.code === 'ESRCH') alive = false; else throw new Error('SWITCH_STOP_FAILED'); }
-      if (!alive) {
-        // Graceful runner releases its own identity-checked lock. Do not remove
-        // a remaining/replaced lock even if a former owner is now dead.
-        const after = await inspect();
-        if (after.state !== 'stopped') throw new Error('SWITCH_PROCESS_CHANGED');
-        return;
-      }
+      if (!alive) { await finishStop(); return; }
       const os = await inspectProcess(identity.pid, root, nodePath);
-      if (!os || os.started !== identity.started || os.command !== identity.command || os.cwd !== identity.cwd) {
+      // The owner may finish between the liveness probe and OS inspection.
+      if (!os) { await finishStop(); return; }
+      if (os.started !== identity.started || os.command !== identity.command || os.cwd !== identity.cwd) {
         throw new Error('SWITCH_PROCESS_CHANGED');
       }
     }
@@ -122,8 +129,9 @@ export function createLocalProcesses({ root, nodePath = process.execPath, inspec
       if (running.state !== 'running' || running.identity.pid !== child.pid) throw new Error('SWITCH_LOCAL_NOT_READY');
     } catch (error) {
       // This is our own newly spawned child, not an arbitrary PID from a file.
-      // Abort its pending startup so a failed command cannot start polling later.
-      try { child.kill('SIGTERM'); } catch {}
+      // Ask our own child to stop cooperatively. Unknown completion still fails
+      // closed: never enable another consumer or escalate to a forced kill.
+      try { if (child.connected) child.send({ event: 'STOP_REQUEST' }, () => {}); } catch {}
       throw error;
     } finally { if (child.connected) child.disconnect(); child.unref(); }
   }

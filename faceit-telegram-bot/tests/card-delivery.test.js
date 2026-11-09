@@ -42,41 +42,44 @@ for (const kind of ['last', 'stats']) {
     imageOnly(bot);
   });
 
-  test(`${kind} report-render failure sends one notice image under the same photo tombstone`, async t => {
+  test(`${kind} report-render failure sends one safe final text under the same photo tombstone`, async t => {
     const bot = await makeHarness(t, { renderCard: report => {
       if (report.kind !== 'notice') throw new Error('PRIVATE_RENDER_ERROR');
       return IMAGE;
     } });
     await bot.send(`/${kind} Nick`);
-    assert.deepEqual(bot.renderedReports.map(report => report.kind), [kind, 'notice']);
-    assert.match(bot.renderedReports[1].message, /Не удалось создать карточку/);
-    assert.ok(!bot.renderedReports[1].message.includes('PRIVATE_RENDER_ERROR'));
-    assert.equal(bot.sent('sendPhoto').length, 1);
-    assert.equal(bot.sent('sendPhoto')[0].photo.name, 'faceit-status.png');
+    assert.deepEqual(bot.renderedReports.map(report => report.kind), [kind]);
+    assert.equal(bot.sent().length, 1);
+    assert.match(bot.sent()[0].text, /Не удалось отправить карточку/);
+    assert.ok(!bot.sent()[0].text.includes('PRIVATE_RENDER_ERROR'));
+    assert.equal(bot.sent()[0].reply_markup, undefined);
+    assert.equal(bot.sent('sendPhoto').length, 0);
     const photo = await bot.db.get("SELECT * FROM deliveries WHERE kind='photo'");
-    assert.equal(photo.status, 'sent');
+    assert.equal(photo.status, 'rejected');
     assert.equal((await bot.db.all("SELECT * FROM deliveries WHERE kind='notice'")).length, 0);
     const job = await bot.db.get('SELECT * FROM report_jobs');
     await bot.click(`continue:${job.job_id}`);
-    assert.equal(bot.sent('sendPhoto').length, 1);
-    assert.equal(bot.renderedReports.length, 2);
-    imageOnly(bot);
+    assert.equal(bot.sent('sendPhoto').length, 0);
+    assert.equal(bot.renderedReports.length, 1);
+    assert.equal(bot.sent().length, 1);
   });
 
-  test(`${kind} double render failure records rejection and never falls back to text`, async t => {
+  test(`${kind} renderer failure records rejection without rendering an intermediate notice`, async t => {
     const bot = await makeHarness(t, { renderCard: () => { throw new Error('PRIVATE_RENDER_ERROR'); } });
     await bot.send(`/${kind} Nick`);
-    assert.deepEqual(bot.renderedReports.map(report => report.kind), [kind, 'notice']);
+    assert.deepEqual(bot.renderedReports.map(report => report.kind), [kind]);
     assert.equal(bot.sent('sendPhoto').length, 0);
     assert.equal((await bot.db.get("SELECT * FROM deliveries WHERE kind='photo'")).status, 'rejected');
-    imageOnly(bot);
+    assert.equal(bot.sent().length, 1);
+    assert.ok(!bot.sent()[0].text.includes('PRIVATE_RENDER_ERROR'));
+    assert.equal(bot.sent()[0].reply_markup, undefined);
   });
 
   for (const [failure, status] of [
     [Object.assign(new Error('PRIVATE_API_ERROR'), { code: 403 }), 'rejected'],
     [new Error('PRIVATE_TRANSPORT_ERROR'), 'outcome_unknown'],
   ]) {
-    test(`${kind} ${status} photo is not followed by text, another notice or a retry`, async t => {
+    test(`${kind} ${status} photo never retries an uncertain POST or renders another image`, async t => {
       const bot = await makeHarness(t, { apiOverrides: { sendPhoto: () => { throw failure; } } });
       const updateId = await bot.send(`/${kind} Nick`, { topicId: 7 });
       assert.equal(bot.sent('sendPhoto').length, 1);
@@ -91,7 +94,11 @@ for (const kind of ['last', 'stats']) {
       await bot.click(`continue:${job.job_id}`, { topicId: 7 });
       assert.equal(bot.sent('sendPhoto').length, 1);
       assert.equal(bot.renderedReports.length, 1);
-      imageOnly(bot);
+      assert.equal(bot.sent().length, status === 'rejected' ? 1 : 0);
+      for (const message of bot.sent()) {
+        assert.equal(message.reply_markup, undefined);
+        assert.ok(!message.text.includes('PRIVATE_API_ERROR'));
+      }
     });
   }
 }
@@ -112,64 +119,68 @@ test('last with delayed detailed stats sends one honest report image without tex
   imageOnly(bot);
 });
 
-test('FACEIT command syntax, API errors and hints use deduplicated notice images', async t => {
+test('FACEIT command syntax, API errors and hints use deduplicated final text, not notice images', async t => {
   const bot = await makeHarness(t, { faceitOverrides: { start: () => {
     throw Object.assign(new Error('PRIVATE_ERROR'), { code: 'PLAYER_NOT_FOUND' });
   } } });
   for (const text of ['/stats', '/last Nick WithSpaces', '/stats MissingNick']) {
     const updateId = await bot.send(text);
-    const count = bot.sent('sendPhoto').length;
+    const count = bot.sent().length;
     await bot.send(text, {}, updateId);
-    assert.equal(bot.sent('sendPhoto').length, count);
+    assert.equal(bot.sent().length, count);
   }
   await bot.click('hint:last', {}, 9001);
   await bot.click('hint:last', {}, 9001);
   await bot.click('hint:stats', {}, 9002);
-  assert.equal(bot.sent('sendPhoto').length, 5);
-  assert.ok(bot.renderedReports.every(report => report.kind === 'notice'));
-  assert.ok(bot.renderedReports.every(report => !report.message.includes('PRIVATE_ERROR')));
-  assert.match(bot.renderedReports[2].message, /Игрок FACEIT не найден/);
-  imageOnly(bot);
+  assert.equal(bot.sent().length, 5);
+  assert.equal(bot.sent('sendPhoto').length, 0);
+  assert.equal(bot.renderedReports.length, 0);
+  assert.ok(bot.sent().every(message => !message.text.includes('PRIVATE_ERROR') && !message.reply_markup));
+  assert.match(bot.sent()[2].text, /Игрок FACEIT не найден/);
 });
 
-test('FACEIT membership and private-chat errors are image-only without bypassing group access', async t => {
+test('FACEIT membership and private-chat errors are text-only without bypassing group access', async t => {
   const bot = await makeHarness(t);
   const updateId = await bot.send('/stats Nick', { userId: 3 });
   await bot.send('/stats Nick', { userId: 3 }, updateId);
-  assert.equal(bot.sent('sendPhoto').length, 1);
-  assert.match(bot.renderedReports[0].message, /Не могу подтвердить членство/);
+  assert.equal(bot.sent().length, 1);
+  assert.match(bot.sent()[0].text, /Не могу подтвердить членство/);
   await bot.send('/last Nick', { chatType: 'private' });
-  assert.equal(bot.sent('sendPhoto').length, 2);
-  assert.match(bot.renderedReports[1].message, /только в группе/);
+  assert.equal(bot.sent().length, 2);
+  assert.match(bot.sent()[1].text, /только в группе/);
   await bot.send('/stats Nick', { chatId: 999 });
   await bot.click('continue:unknown', { chatId: 999 });
-  assert.equal(bot.sent('sendPhoto').length, 2);
+  assert.equal(bot.sent().length, 2);
+  assert.equal(bot.sent('sendPhoto').length, 0);
+  assert.equal(bot.renderedReports.length, 0);
   assert.equal(bot.starts.length, 0);
-  imageOnly(bot);
+  assert.ok(bot.sent().every(message => !message.reply_markup));
 });
 
-test('a leased job uses a notice image and continuation button without advancing FACEIT', async t => {
+test('a leased job returns one final busy text without issuing more FACEIT calls or continuation buttons', async t => {
   const bot = await makeHarness(t);
   await bot.store.createJob('busy', -10, 7, { kind: 'stats', nickname: 'Nick', phase: 'history' });
   await bot.store.leaseJob('busy', 0);
   await bot.click('continue:busy', { topicId: 7 });
   assert.equal(bot.advances.length, 0);
-  assert.equal(bot.sent('sendPhoto').length, 1);
-  assert.match(bot.renderedReports[0].title, /уже обрабатывается/);
-  assert.ok(bot.sent('sendPhoto')[0].reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'continue:busy'));
-  imageOnly(bot);
+  assert.equal(bot.sent('sendPhoto').length, 0);
+  assert.equal(bot.sent().length, 1);
+  assert.match(bot.sent()[0].text, /уже обрабатывается/);
+  assert.equal(bot.sent()[0].reply_markup, undefined);
 });
 
-test('continuation API errors and unavailable jobs use safe notice images', async t => {
+test('legacy continuation API errors and unavailable jobs use safe final text', async t => {
   const bot = await makeHarness(t, { faceitOverrides: { advance: () => {
     throw Object.assign(new Error('PRIVATE_CALLBACK_ERROR'), { code: 'FACEIT_ACCESS_DENIED' });
   } } });
   await bot.store.createJob('error', -10, 7, { kind: 'stats', nickname: 'Nick', phase: 'history' });
   await bot.click('continue:error', { topicId: 7 });
-  assert.match(bot.renderedReports[0].message, /FACEIT отклонил ключ API/);
-  assert.ok(!bot.renderedReports[0].message.includes('PRIVATE_CALLBACK_ERROR'));
+  assert.match(bot.sent()[0].text, /FACEIT отклонил ключ API/);
+  assert.ok(!bot.sent()[0].text.includes('PRIVATE_CALLBACK_ERROR'));
   await bot.click('continue:missing', { topicId: 7 });
-  assert.match(bot.renderedReports[1].message, /недоступен в текущем чате/);
-  assert.equal(bot.sent('sendPhoto').length, 2);
-  imageOnly(bot);
+  assert.match(bot.sent()[1].text, /недоступен в текущем чате/);
+  assert.equal(bot.sent().length, 2);
+  assert.equal(bot.sent('sendPhoto').length, 0);
+  assert.equal(bot.renderedReports.length, 0);
+  assert.ok(bot.sent().every(message => !message.reply_markup));
 });

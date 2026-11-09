@@ -15,7 +15,7 @@
 
 ## Текущий статус
 
-`@road_to_3_elo_bot` создан; доступ к Telegram Serverless запрошен, пока лист ожидания. До одобрения нельзя пройти Telegram Serverless CLI login и публикацию на этой платформе. Текущая облачная копия работает на Sites; локальный runner — резерв. Подготовить FACEIT key можно независимо от Telegram. Тестовый ник — `aghori-`, пример тестовой супергруппы — `chat_id -1004393474895`; этот ID не ограничивает доступ.
+`@road_to_3_elo_bot` создан; доступ к Telegram Serverless запрошен, пока лист ожидания. До одобрения нельзя пройти Telegram Serverless CLI login и публикацию на этой платформе. Текущая облачная копия работает на Sites; локальный runner — резерв. Подготовить FACEIT key можно независимо от Telegram. Тестовый ник — `aghori-`, пример тестовой супергруппы — `chat_id -1001234567890`; этот ID не ограничивает доступ.
 
 ## Инсталляция после одобрения Serverless
 
@@ -23,7 +23,7 @@
 
 ```bash
 npx tgcloud login
-npm run configure -- --faceit-key-file /Users/busygind02/IdeaProject/faceit-telegram-bot/.secrets/faceit.key
+npm run configure -- --faceit-key-file ~/IdeaProject/faceit-telegram-bot/.secrets/faceit.key
 npm run deploy -- --dry-run
 npm run deploy
 npx tgcloud migrate --dry-run
@@ -66,7 +66,7 @@ CLI token вводится интерактивно, сохраняется в �
 1. `tgcloud webhook`: платформа получает нужные update types; в облаке должны быть только message и callback_query handlers.
 2. `/setup`: правильный ли это групповой чат, какой у него ID, есть ли у бота права администратора и отправки. Telegram гарантирует проверку чужого membership через getChatMember только для бота-администратора.
 3. Плохой FACEIT key/401/403: не повторять бесконечно; перевыпустить Server side key и обновить private config.
-4. 429/5xx: дождаться retryAt и нажать «Продолжить». Invocation не живёт в фоне. Можно уменьшить maxRequests в защищённом конфиге с повторным configure/deploy после оценки лимита среды.
+4. 429/5xx: бот сам ожидает короткий retryAt до дедлайна; ручного продолжения нет. По таймауту — один текстовый отказ. Invocation не живёт в фоне. Можно уменьшить maxRequests в защищённом конфиге с повторным configure/deploy после оценки лимита среды.
 5. Кнопка устарела/другой чат/тема: новый запрос с ником в нужной теме; не менять чужой job адрес доставки.
 6. После outcome_unknown опроса/фото сначала посмотреть чат. Автоматический POST retry запрещён. Новый явный запрос может дублировать уже доставленный результат — это осознанное действие человека.
 

@@ -9,6 +9,7 @@ import { Store } from '../tgcloud/lib/store.js';
 import { createTelegramApi, createInputFile } from './telegram.mjs';
 import { openDatabase } from './database.mjs';
 import { runPolling } from './polling.mjs';
+import { watchLocalStop } from './shutdown.mjs';
 import { loadCredentials, loadEncryptionKey, secureDirectory, acquireLock } from './config.mjs';
 import { compressPng } from './png.mjs';
 import { createCachedFaceitFetch } from './faceit-cache.mjs';
@@ -29,6 +30,36 @@ export function parseOptions(args, root = resolve(import.meta.dirname, '..')) {
 
 export async function runLocal(options, { fetch = globalThis.fetch, signal, onStatus = () => {} } = {}) {
   const { root, expectedUsername = 'road_to_3_elo_bot', checkOnly } = options;
+  const stopController = new AbortController();
+  const stopSignal = signal ? AbortSignal.any([signal, stopController.signal]) : stopController.signal;
+  const waitUntil = async retryAt => {
+    if (!Number.isSafeInteger(retryAt) || stopSignal.aborted) return false;
+    const targetMs = retryAt * 1000;
+    if (targetMs <= Date.now()) return true;
+    if (targetMs - Date.now() > 120000) return false;
+    // Interrupt only a passive retry wait on shutdown. HTTP already in flight
+    // still drains normally, so delivery/offset can be committed before exit.
+    const limit = performance.now() + 120000;
+    return new Promise(resolve => {
+      let timer;
+      const finish = result => {
+        clearTimeout(timer);
+        stopSignal.removeEventListener('abort', stopped);
+        resolve(result);
+      };
+      const stopped = () => finish(false);
+      const check = () => {
+        if (stopSignal.aborted) return finish(false);
+        const remaining = targetMs - Date.now();
+        if (remaining <= 0) return finish(true);
+        const allowance = limit - performance.now();
+        if (allowance <= 0) return finish(false);
+        timer = setTimeout(check, Math.min(remaining, allowance));
+      };
+      stopSignal.addEventListener('abort', stopped, { once: true });
+      check();
+    });
+  };
   const credentials = await loadCredentials(options);
   // Optional chat IDs are diagnostic targets, never a runtime allowlist.
   if (credentials.chatIds.length && !checkOnly) throw new Error('LOCAL_ARGUMENTS');
@@ -38,14 +69,13 @@ export async function runLocal(options, { fetch = globalThis.fetch, signal, onSt
       throw new Error('LOCAL_NETWORK_ORIGIN');
     }
     const signals = [AbortSignal.timeout(target.origin === 'https://open.faceit.com' ? 20000 : 120000)];
-    if (signal) signals.push(signal);
     if (request.signal) signals.push(request.signal);
     return fetch(url, { ...request, signal: AbortSignal.any(signals), redirect: 'error' });
   };
   const api = createTelegramApi({ token: credentials.token, fetch: networkFetch });
-  const me = await api.getMe();
+  const me = await api.getMe(undefined, { signal: stopSignal });
   if (me?.is_bot !== true || me.username?.toLowerCase() !== expectedUsername.toLowerCase()) throw new Error('LOCAL_BOT_MISMATCH');
-  const webhook = await api.getWebhookInfo();
+  const webhook = await api.getWebhookInfo(undefined, { signal: stopSignal });
   if (!webhook || typeof webhook.url !== 'string') throw new Error('LOCAL_WEBHOOK_CHECK');
   if (webhook.url) throw new Error('WEBHOOK_ACTIVE');
   let canDelete = credentials.chatIds.length ? true : null;
@@ -65,22 +95,30 @@ export async function runLocal(options, { fetch = globalThis.fetch, signal, onSt
   const folder = join(root, '.local-data');
   await secureDirectory(folder);
   const release = await acquireLock(join(folder, 'polling.lock'));
-  let database;
+  let database, closeStopWatcher;
   try {
+    closeStopWatcher = await watchLocalStop(root, {
+      onStop: () => stopController.abort(),
+      onInvalid: () => onStatus({ code: 'LOCAL_STOP_REQUEST_UNSAFE' }),
+    });
+    if (stopSignal.aborted) return summary;
     const key = await loadEncryptionKey(root);
     database = await openDatabase(join(folder, 'bot.sqlite'));
     const settings = { maxRequests: 4, autoAdvanceBatches: 32, autoAdvanceSeconds: 90 };
     const bot = createBot({
       api, store: new Store(database.db), settings,
+      shouldContinue: () => !stopSignal.aborted, waitUntil,
       reportCache: createReportCache({ db: database.db, botToken: credentials.token, faceitKey: credentials.faceitKey }),
       sealer: createSealer({ keyHex: key.keyHex, keyId: key.keyId }),
       faceit: createFaceitService({ fetch: createCachedFaceitFetch({ fetch: networkFetch }), key: credentials.faceitKey }),
       renderCard: (report) => compressPng(renderReportCard(report)), inputFile: createInputFile,
     });
-    await runPolling({ api, bot, database, signal, onStatus });
+    await runPolling({ api, bot, database, signal: stopSignal, onStatus });
     return summary;
   } finally {
-    try { database?.close(); } finally { await release(); }
+    try {
+      try { database?.close(); } finally { await closeStopWatcher?.(); }
+    } finally { await release(); }
   }
 }
 
@@ -102,7 +140,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   process.umask(0o077);
   const controller = new AbortController();
   const stop = () => controller.abort();
-  process.once('SIGINT', stop); process.once('SIGTERM', stop);
+  const stopMessage = message => { if (message?.event === 'STOP_REQUEST') stop(); };
+  process.on('message', stopMessage);
+  // Repeated Ctrl+C remains an idempotent drain request, not a default hard exit.
+  process.on('SIGINT', stop); process.on('SIGTERM', stop);
   Promise.resolve().then(() => runLocal(parseOptions(process.argv.slice(2)), {
     signal: controller.signal,
     onStatus: (status) => {
@@ -110,8 +151,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       if (status.code === 'POLLING_READY' && process.connected) process.send({ event: 'POLLING_READY' }, () => {});
     },
   })).catch((error) => {
-    if (!controller.signal.aborted) { console.error(JSON.stringify({ event: 'LOCAL_STOPPED', code: safeFailure(error) })); process.exitCode = 1; }
+    if (!(controller.signal.aborted && error?.code === 'TELEGRAM_ABORTED')) { console.error(JSON.stringify({ event: 'LOCAL_STOPPED', code: safeFailure(error) })); process.exitCode = 1; }
   }).finally(() => {
     process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop);
+    process.removeListener('message', stopMessage);
   });
 }

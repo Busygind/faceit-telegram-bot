@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-export const REPORT_CACHE_SCOPE = 'faceit-dark-v1/core-schema-v1';
+export const REPORT_CACHE_SCOPE = 'faceit-dark-v2-level-icons/core-schema-v1';
 export const REPORT_CACHE_SCHEMA = [
   `CREATE TABLE IF NOT EXISTS report_cache (
     cache_key TEXT PRIMARY KEY, scope_hash TEXT NOT NULL, kind TEXT NOT NULL,
@@ -77,6 +77,7 @@ export function createReportCache({ db, botToken, faceitKey, now = () => Math.fl
   };
 
   return {
+    rendererScope,
     async get(state) {
       const id = identity(state, scope, rendererScope);
       if (!id) return null;

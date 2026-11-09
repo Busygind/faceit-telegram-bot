@@ -89,7 +89,10 @@ export function createCloudRuntime(env, {
     const epochNow = () => Math.floor(now() / 1000);
     const metrics = { faceitReads: 0, telegramRequests: 0, databaseCalls: 0, renderCount: 0, photoUploads: 0, photoFileReuses: 0 };
     const controller = new AbortController();
-    const shouldContinue = () => !controller.signal.aborted && now() < workDeadline;
+    // FACEIT cannot spend the reserved 25 seconds needed for a final reply.
+    // The work signal is separate: aborting a slow GET must not cancel Telegram.
+    const workController = new AbortController();
+    const shouldContinue = () => !controller.signal.aborted && !workController.signal.aborted && now() < workDeadline;
     const assertActive = () => {
       if (controller.signal.aborted || now() >= deadline) {
         controller.abort();
@@ -97,6 +100,38 @@ export function createCloudRuntime(env, {
       }
     };
     const timer = setTimer(() => controller.abort(), Math.max(0, deadline - now()));
+    const workTimer = setTimer(() => workController.abort(), Math.max(0, workDeadline - now()));
+    const assertWorkActive = () => {
+      assertActive();
+      if (!shouldContinue()) {
+        workController.abort();
+        throw new DOMException('FACEIT work deadline reached', 'AbortError');
+      }
+    };
+    // A Retry-After is an absolute Unix timestamp, not a fresh relative delay.
+    // Await it within this invocation; no early ACK or background task exists.
+    const waitUntil = async retryAt => {
+      if (!Number.isFinite(retryAt) || retryAt < 0 || !shouldContinue()) return false;
+      const delay = Math.max(0, retryAt * 1000 - now());
+      if (delay === 0) return shouldContinue();
+      if (delay >= workDeadline - now()) return false;
+      return new Promise(resolve => {
+        let settled = false;
+        let waitTimer;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          if (waitTimer !== undefined) clearTimer(waitTimer);
+          controller.signal.removeEventListener('abort', finish);
+          workController.signal.removeEventListener('abort', finish);
+          resolve(shouldContinue() && now() >= retryAt * 1000);
+        };
+        controller.signal.addEventListener('abort', finish, { once: true });
+        workController.signal.addEventListener('abort', finish, { once: true });
+        waitTimer = setTimer(finish, delay);
+        if (!shouldContinue()) finish();
+      });
+    };
     const networkFetch = async (url, request = {}) => {
       let service = 'runtime';
       try {
@@ -105,6 +140,7 @@ export function createCloudRuntime(env, {
       if (!['https://api.telegram.org', 'https://open.faceit.com'].includes(target.origin) || target.username || target.password) throw new Error('CLOUD_ORIGIN');
       const faceit = target.origin === 'https://open.faceit.com';
       service = faceit ? 'faceit' : 'telegram';
+      if (faceit) assertWorkActive();
       if (faceit) metrics.faceitReads++;
       else {
         metrics.telegramRequests++;
@@ -114,13 +150,17 @@ export function createCloudRuntime(env, {
         }
       }
       if (typeof AbortSignal.any !== 'function' || typeof AbortSignal.timeout !== 'function') throw new Error('CLOUD_ABORT_UNSUPPORTED');
-      const signals = [controller.signal, AbortSignal.timeout(Math.max(1, Math.min(deadline - now(), faceit ? 15000 : 35000)))];
+      const requestDeadline = faceit ? workDeadline : deadline;
+      const signals = [controller.signal, AbortSignal.timeout(Math.max(1, Math.min(requestDeadline - now(), faceit ? 15000 : 35000)))];
+      if (faceit) signals.push(workController.signal);
       if (request.signal) signals.push(request.signal);
       // This check is also reached after every awaited database/cache operation
       // before any new outbound request. Only successful match bodies are cached.
-      assertActive();
+      if (faceit) assertWorkActive();
+      else assertActive();
       const response = await fetchWithoutRedirects(faceit ? cachedFetch : fetch, url, { ...request, signal: AbortSignal.any(signals) });
-      assertActive();
+      if (faceit) assertWorkActive();
+      else assertActive();
       if ([400,401,403,404,409,413,429,500,502,503,504].includes(response.status)) onDiagnostic(`CLOUD_UPSTREAM_HTTP_${response.status}`, service);
       return response;
       } catch (error) {
@@ -137,7 +177,7 @@ export function createCloudRuntime(env, {
         metrics.databaseCalls++; return adapter[method](...args);
       }]));
       const bot = createBot({
-        api, store: new Store(database, epochNow), now: epochNow, shouldContinue,
+        api, store: new Store(database, epochNow), now: epochNow, shouldContinue, waitUntil,
         reportCache: createReportCache({ db: database, botToken: env.BOT_TOKEN, faceitKey: env.FACEIT_API_KEY, now: epochNow, onEvent: onCacheEvent }),
         settings: { maxRequests: 8, autoAdvanceBatches: 32, autoAdvanceSeconds: CLOUD_WORK_MS / 1000 },
         sealer: createSealer({ keyHex: env.TS_ENCRYPTION_KEY, keyId: 'cloud-v1' }),
@@ -148,7 +188,9 @@ export function createCloudRuntime(env, {
       else if (update.callback_query) await bot.handleCallback(update.callback_query, { update });
     } finally {
       clearTimer(timer);
+      clearTimer(workTimer);
       controller.abort();
+      workController.abort();
       try { onMetrics({ ...metrics, elapsedMs: Math.max(0, now() - startedAt) }); } catch { /* Metrics cannot break delivery. */ }
     }
   };

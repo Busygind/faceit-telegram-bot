@@ -1,4 +1,5 @@
 import { FONT_ASCENT, FONT_SIZE, GLYPHS } from './card-font.js';
+import { getLevelBadge, LEVEL_BADGE_SIZE } from './faceit-levels.js';
 
 // Portable renderer: no DOM, Node, canvas, filesystem, fetch, or runtime packages.
 // All values come from the normalized report; no metrics are recomputed.
@@ -152,6 +153,26 @@ class Raster {
     const result = fit(input, maxWidth, size, minimum);
     this.text(result.text, x, y, result.size, color, align);
   }
+
+  rgba(image, x, y) {
+    // Build-time-sized, read-only RGBA pixels; no runtime resizing/allocation.
+    for (let sy = 0; sy < image.height; sy++) {
+      const py = y + sy;
+      if (py < 0 || py >= this.height) continue;
+      for (let sx = 0; sx < image.width; sx++) {
+        const px = x + sx;
+        if (px < 0 || px >= this.width) continue;
+        const source = (sy * image.width + sx) * 4;
+        const alpha = image.pixels[source + 3] / 255;
+        if (!alpha) continue;
+        const target = (py * this.width + px) * 3;
+        for (let channel = 0; channel < 3; channel++) {
+          this.pixels[target + channel] = Math.round(image.pixels[source + channel] * alpha
+            + this.pixels[target + channel] * (1 - alpha));
+        }
+      }
+    }
+  }
 }
 
 function number(value, decimals = 0) {
@@ -193,7 +214,7 @@ function base(report, section, width = CARD_WIDTH) {
   if (!report || typeof report !== 'object') throw new TypeError('PlayerReport is required');
   const image = new Raster(width, CARD_HEIGHT, C.background);
   const right = width - 48;
-  const levelX = right - 162;
+  const levelX = right - LEVEL_BADGE_SIZE;
   image.rect(48, 32, 70, 4, C.accent, 2);
   image.text('FACEIT / CS2', 48, 48, 21, C.accent);
   image.fitted(section, right, 48, width - 354, 20, 16, C.muted, 'right');
@@ -203,8 +224,13 @@ function base(report, section, width = CARD_WIDTH) {
   image.fitted(monogram, 92, 130, 75, 34, 20, C.background, 'center');
   image.fitted(report.nickname || 'Игрок', 158, 108, levelX - 186, 43, 28);
   image.fitted(`ELO ${number(report.elo)} · сейчас`, 158, 168, levelX - 187, 23, 19, C.muted);
-  image.rect(levelX, 122, 162, 48, C.accentPanel, 12);
-  image.fitted(`LEVEL ${number(report.level)}`, levelX + 81, 133, 142, 23, 18, C.accent, 'center');
+  const badge = getLevelBadge(report.level);
+  if (badge) image.rgba(badge, levelX, 112);
+  else {
+    // Missing/invalid FACEIT level is unknown, not an invented rank.
+    image.rect(levelX, 112, LEVEL_BADGE_SIZE, LEVEL_BADGE_SIZE, C.panel, LEVEL_BADGE_SIZE / 2);
+    image.text('—', levelX + LEVEL_BADGE_SIZE / 2, 134, 34, C.faint, 'center');
+  }
   return image;
 }
 

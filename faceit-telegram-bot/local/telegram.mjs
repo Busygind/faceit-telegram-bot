@@ -2,6 +2,7 @@ const TELEGRAM_ORIGIN = 'https://api.telegram.org';
 const METHODS = Object.freeze([
   'getMe', 'getChat', 'getChatMember', 'sendMessage', 'sendPoll', 'sendPhoto',
   'deleteMessage', 'answerCallbackQuery', 'setMyCommands', 'getWebhookInfo', 'getUpdates',
+  'forwardMessage', 'pinChatMessage', 'unpinChatMessage',
 ]);
 
 function safeInteger(value, minimum, maximum) {
@@ -11,7 +12,7 @@ function safeInteger(value, minimum, maximum) {
 // Never retain the original Error, URL, response description or response body.
 // Bot API URLs contain the bot token, including in transport Error messages.
 export class TelegramApiError extends Error {
-  constructor({ code = 'TELEGRAM_TRANSPORT', status = 0, parameters, invalidFileId = false } = {}) {
+  constructor({ code = 'TELEGRAM_TRANSPORT', status = 0, parameters, invalidFileId = false, unpinTargetMissing = false } = {}) {
     const numericCode = safeInteger(code, 100, 599);
     const safeCode = numericCode ? code
       : ['TELEGRAM_TRANSPORT', 'TELEGRAM_TIMEOUT', 'TELEGRAM_ABORTED', 'TELEGRAM_CONFIG', 'TELEGRAM_INPUT', 'TELEGRAM_RESPONSE'].includes(code)
@@ -21,6 +22,7 @@ export class TelegramApiError extends Error {
     this.code = safeCode;
     this.status = safeInteger(status, 100, 599) ? status : 0;
     Object.defineProperty(this, 'invalidFileId', { value: code === 400 && invalidFileId === true, enumerable: true });
+    Object.defineProperty(this, 'unpinTargetMissing', { value: code === 400 && unpinTargetMissing === true, enumerable: true });
     this.parameters = {};
     if (safeInteger(parameters?.retry_after, 0, Number.MAX_SAFE_INTEGER)) this.parameters.retry_after = parameters.retry_after;
     if (safeInteger(parameters?.migrate_to_chat_id, Number.MIN_SAFE_INTEGER, -1)) {
@@ -45,6 +47,11 @@ function parameters(value) {
     throw new TelegramApiError({ code: 'TELEGRAM_INPUT' });
   }
   return { ...value };
+}
+
+function knownMissingUnpinTarget(description) {
+  return typeof description === 'string'
+    && /^(?:bad request: )?message (?:to unpin not found|is not pinned)[.!]?$/i.test(description);
 }
 
 function knownInvalidFileId(description) {
@@ -119,7 +126,9 @@ export function createTelegramApi({ token, fetch = globalThis.fetch, timeoutMs =
       if (result?.ok === false) {
         throw new TelegramApiError({ code: result.error_code, status: response.status, parameters: result.parameters,
           invalidFileId: method === 'sendPhoto' && typeof params.photo === 'string'
-            && result.error_code === 400 && response.status === 400 && knownInvalidFileId(result.description) });
+            && result.error_code === 400 && response.status === 400 && knownInvalidFileId(result.description),
+          unpinTargetMissing: method === 'unpinChatMessage' && result.error_code === 400 && response.status === 400
+            && knownMissingUnpinTarget(result.description) });
       }
       if (!response.ok || result?.ok !== true || !Object.hasOwn(result, 'result')) {
         throw new TelegramApiError({ code: 'TELEGRAM_RESPONSE', status: response.status });

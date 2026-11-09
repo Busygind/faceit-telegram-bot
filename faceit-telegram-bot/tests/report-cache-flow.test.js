@@ -104,7 +104,9 @@ test('pagination continuation waits for the full snapshot, checks cache once and
   await f.bot.send('/last Player');
   assert.equal(f.gets.length, 0); assert.equal(f.calls.filter(path => path.endsWith('/history')).length, 2);
   const job = (await f.bot.db.all('SELECT * FROM report_jobs')).find(row => row.status === 'pending'); assert.ok(job);
-  assert.equal(f.bot.renderedReports.at(-1).kind, 'notice');
+  assert.equal(f.bot.sent().length, 1);
+  assert.equal(f.bot.sent().at(-1).reply_markup, undefined);
+  assert.equal(f.bot.renderedReports.length, 1);
   f.bot.restart(); await f.bot.click(`continue:${job.job_id}`);
   assert.equal(f.gets.length, 1); assert.equal(f.calls.filter(path => path.endsWith('/history')).length, 3);
   assert.equal(f.calls.filter(path => path.includes('/matches/')).length, 0); assert.equal(f.bot.sent('sendPhoto').at(-1).photo, LARGE);
@@ -133,23 +135,31 @@ test('only a definitely invalid cached file_id allows one byte fallback under th
 for (const error of [Object.assign(new Error('other bad request'), { code: 400 }), Object.assign(new Error('flood'), { code: 429 }), new Error('ambiguous transport')]) {
   test(`cached file_id failure ${error.code ?? 'network'} never triggers a fallback or rerender`, async t => {
     const f = await fixture(t, 'last'); await f.bot.send('/last Player'); f.failPhotos(() => { throw error; });
-    await f.bot.send('/last Player'); assert.equal(f.bot.sent('sendPhoto').length, 2); assert.equal(f.bot.renderedReports.length, 1); assert.equal(f.bot.sent().length, 0);
+    await f.bot.send('/last Player'); assert.equal(f.bot.sent('sendPhoto').length, 2); assert.equal(f.bot.renderedReports.length, 1); assert.equal(f.bot.sent().length, error.code ? 1 : 0);
+    assert.ok(f.bot.sent().every(message => !message.reply_markup));
     const rows = await f.bot.db.all("SELECT * FROM deliveries WHERE kind='photo'"); assert.equal(rows.at(-1).status, error.code ? 'rejected' : 'outcome_unknown');
   });
 }
 
-test('rate-limited history persists without looking up a stale cached report, then resumes safely', async t => {
+test('rate-limited history preserves a resumable checkpoint without stale cache lookup or a progress image', async t => {
   const f = await fixture(t, 'last'); await f.bot.send('/last Player'); f.gets.length = 0; f.rateLimitHistory();
-  await f.bot.send('/last Player'); assert.equal(f.gets.length, 0); assert.equal(f.bot.renderedReports.at(-1).kind, 'notice');
+  await f.bot.send('/last Player'); assert.equal(f.gets.length, 0);
+  assert.equal(f.bot.sent().length, 1);
+  assert.equal(f.bot.sent().at(-1).reply_markup, undefined);
+  assert.equal(f.bot.renderedReports.length, 1);
   const job = (await f.bot.db.all('SELECT * FROM report_jobs')).find(row => row.status === 'pending'); assert.ok(job);
   f.tick(4); await f.bot.click(`continue:${job.job_id}`); assert.equal(f.gets.length, 1); assert.equal(f.bot.sent('sendPhoto').at(-1).photo, LARGE);
 });
 
-test('render-error notice is never persisted as a report photo file_id', async t => {
+test('render-error final text is never persisted as a report photo file_id', async t => {
   const f = await fixture(t, 'last');
-  f.bot.dependencies.renderCard = report => { if (report.kind !== 'notice') throw new Error('render failed'); return new Uint8Array([1,2,3]); }; f.bot.restart();
+  const rendered = [];
+  f.bot.dependencies.renderCard = report => { rendered.push(report.kind); throw new Error('render failed'); }; f.bot.restart();
   await f.bot.send('/last Player'); assert.equal(f.puts.length, 1); assert.equal(f.puts[0].fileId, null);
-  assert.equal([...f.entries.values()][0].fileId, null); assert.equal(f.bot.sent('sendPhoto').length, 1);
+  assert.equal([...f.entries.values()][0].fileId, null); assert.equal(f.bot.sent('sendPhoto').length, 0);
+  assert.deepEqual(rendered, ['last']);
+  assert.equal(f.bot.sent().length, 1);
+  assert.equal(f.bot.sent()[0].reply_markup, undefined);
 });
 
 test('blocked dense history persists an honest terminal checkpoint without cache lookup', async t => {
@@ -159,5 +169,8 @@ test('blocked dense history persists an honest terminal checkpoint without cache
     advance: async state => { advances++; return { done: false, state, progress: { reason: 'HISTORY_DENSITY_UNRESOLVED' } }; },
   }; f.bot.restart(); await f.bot.send('/last Player');
   const job = (await f.bot.db.all('SELECT * FROM report_jobs'))[0]; assert.equal(job.status, 'blocked'); assert.equal(f.gets.length, 0);
-  const before = advances; await f.bot.click(`continue:${job.job_id}`); assert.equal(advances, before); assert.equal(f.bot.sent().length, 0);
+  const before = advances; await f.bot.click(`continue:${job.job_id}`); assert.equal(advances, before);
+  assert.equal(f.bot.sent().length, 2);
+  assert.equal(f.bot.sent('sendPhoto').length, 0);
+  assert.ok(f.bot.sent().every(message => !message.reply_markup));
 });

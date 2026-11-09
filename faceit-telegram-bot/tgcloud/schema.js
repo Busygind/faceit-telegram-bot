@@ -38,3 +38,25 @@ export const playerLinks = table('player_links', {
   nickname: text('nickname').notNull(),
   updatedAt: integer('updated_at').notNull(),
 }, (t) => ({ owner: uniqueIndex('idx_player_links_chat_user').on(t.chatId, t.userId) }));
+
+export const pollState = table('poll_state', {
+  chatId: integer('chat_id').primaryKey(),
+  originalMessageId: integer('original_message_id'),
+  pollId: text('poll_id'),
+  createdAt: integer('created_at'),
+  latestMessageId: integer('latest_message_id'),
+  pinnedMessageId: integer('pinned_message_id'),
+  pendingUnpinIds: text('pending_unpin_ids').notNull().default('[]'),
+  ownerRequestId: text('owner_request_id'),
+  phase: text('phase').notNull().default('idle'),
+  leaseUntil: integer('lease_until').notNull().default(0),
+  unknownUntil: integer('unknown_until').notNull().default(0),
+  updatedAt: integer('updated_at').notNull(),
+});
+
+export const pollRequests = table('poll_requests', {
+  requestId: text('request_id').primaryKey(),
+  chatId: integer('chat_id').notNull(),
+  status: text('status').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+}, (t) => ({ updated: index('idx_poll_requests_updated').on(t.updatedAt) }));

@@ -267,7 +267,9 @@ export function buildReport(state, updatedAt) {
 function retryAfter(response, now, attempt = 0) {
   const header = response?.headers?.get?.('retry-after');
   const seconds = header !== undefined && header !== null && /^\d+(?:\.\d+)?$/.test(String(header)) ? Number(header) : null;
-  if (seconds !== null) return now + Math.max(1, Math.ceil(seconds));
+  // The injected clock is rounded to Unix seconds. One conservative second
+  // prevents a fractional-second response from shortening a relative delay.
+  if (seconds !== null) return now + Math.max(1, Math.ceil(seconds)) + 1;
   const date = header ? Date.parse(header) : NaN;
   if (Number.isFinite(date)) return Math.max(now + 1, Math.ceil(date / 1000));
   return now + Math.min(300, 2 ** Math.min(attempt + 1, 8)) + Math.floor(Math.random() * 3);

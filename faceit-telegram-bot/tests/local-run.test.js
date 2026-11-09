@@ -307,3 +307,37 @@ test('explicit --check diagnostics retain strict per-chat identity, admin and de
   await assert.rejects(runLocal({ root: f.root, chatIds: [CHAT], checkOnly: false }, { fetch: noDiagnosticsWhileRunning.fetch }), /LOCAL_ARGUMENTS/);
   assert.deepEqual(noDiagnosticsWhileRunning.calls, []);
 });
+
+test('graceful local stop leaves handler HTTP alive until delivery and offset are committed', async t => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  const update = { update_id: 88, message: { message_id: 20, text: '/menu',
+    chat: { id: CHAT, type: 'supergroup' }, from: { id: 123, is_bot: false } } };
+  let sendStarted, finishSend, outboundSignal;
+  const sending = new Promise(resolve => { sendStarted = resolve; });
+  const delivered = new Promise(resolve => { finishSend = resolve; });
+  const h = fakeTelegram({ batches: [[update]], stop: () => assert.fail('no polling after stop') });
+  const fetch = async (url, request) => {
+    if (new URL(url).pathname.endsWith('/sendMessage')) {
+      outboundSignal = request.signal;
+      sendStarted();
+      await delivered;
+      assert.equal(request.signal.aborted, false);
+    }
+    return h.fetch(url, request);
+  };
+  let finished = false;
+  const running = runLocal({ root: f.root }, { fetch, signal: controller.signal }).then(() => { finished = true; });
+  await sending;
+  controller.abort();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(finished, false);
+  assert.equal(outboundSignal.aborted, false);
+  assert.ok((await lstat(join(f.root, '.local-data/polling.lock'))).isFile());
+  finishSend();
+  await running;
+  assert.equal(finished, true);
+  await assert.rejects(lstat(join(f.root, '.local-data/polling.lock')), { code: 'ENOENT' });
+  const database = await openDatabase(join(f.root, '.local-data/bot.sqlite'));
+  try { assert.equal(await database.getOffset(), 89); } finally { database.close(); }
+});

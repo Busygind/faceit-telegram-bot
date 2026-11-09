@@ -202,9 +202,9 @@ test('abort interrupts long getUpdates promptly and never acknowledges in-flight
   assert.equal(h.statuses.at(-1).code, 'POLLING_STOPPED');
 });
 
-test('shutdown waits for in-flight handler to settle and leaves its update unacknowledged', async t => {
+test('shutdown drains and acknowledges only the completed in-flight handler', async t => {
   const { database } = await fixture(t);
-  const h = harness(database, [[{ update_id: 7, message: {} }]]);
+  const h = harness(database, [[{ update_id: 7, message: {} }, { update_id: 8, message: { text: 'must remain queued' } }]]);
   let finish;
   let settled = false;
   h.bot.handleMessage = async () => {
@@ -220,7 +220,9 @@ test('shutdown waits for in-flight handler to settle and leaves its update unack
   finish();
   await polling;
   assert.equal(settled, true);
-  assert.equal(await database.getOffset(), 0);
+  assert.equal(await database.getOffset(), 8);
+  assert.equal(h.calls.filter(call => call[0] === 'getUpdates').length, 1);
+  assert.equal(h.handled.length, 0);
 });
 
 test('abort before startup does not issue any API request', async t => {
@@ -249,4 +251,62 @@ test('malformed update IDs cannot rewind or acknowledge the queue', async t => {
     await assert.rejects(runPolling(h.options), /INVALID_UPDATE/);
     assert.equal(await database.getOffset(), 0);
   }
+});
+
+test('shutdown during a callback waits for offset commit and does not start another update', async t => {
+  const { database } = await fixture(t);
+  const h = harness(database, [[{ update_id: 7, callback_query: {} }, { update_id: 8, message: {} }]]);
+  let finishCommit, stopped = false;
+  const setOffset = database.setOffset;
+  h.options.database = { ...database, setOffset: async offset => {
+    h.controller.abort();
+    await new Promise(resolve => { finishCommit = resolve; });
+    await setOffset(offset);
+  } };
+  const polling = runPolling(h.options).then(() => { stopped = true; });
+  await new Promise(resolve => h.controller.signal.addEventListener('abort', resolve, { once: true }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stopped, false);
+  assert.equal(await database.getOffset(), 0);
+  finishCommit();
+  await polling;
+  assert.equal(await database.getOffset(), 8);
+  assert.deepEqual(h.handled.map(call => call[0]), ['callback']);
+});
+
+test('failed in-flight delivery after shutdown is not acknowledged or retried', async t => {
+  const { database } = await fixture(t);
+  const h = harness(database, [[{ update_id: 7, message: {} }, { update_id: 8, message: {} }]]);
+  let attempts = 0;
+  h.bot.handleMessage = async () => { attempts++; h.controller.abort(); throw new Error('ambiguous delivery'); };
+  await assert.rejects(runPolling(h.options), /POLLING_HANDLER_FAILED/);
+  assert.equal(await database.getOffset(), 0);
+  assert.equal(attempts, 1);
+  assert.deepEqual(h.waits, []);
+});
+
+test('shutdown never hides an offset commit failure or treats the update as acknowledged', async t => {
+  const { database } = await fixture(t);
+  const h = harness(database, [[{ update_id: 7, message: {} }, { update_id: 8, message: {} }]]);
+  const failure = new Error('LOCAL_DATABASE_COMMIT_FAILED');
+  let commits = 0;
+  h.options.database = { ...database, setOffset: async () => {
+    commits++;
+    h.controller.abort();
+    throw failure;
+  } };
+  await assert.rejects(runPolling(h.options), error => error === failure);
+  assert.equal(commits, 1);
+  assert.equal(await database.getOffset(), 0);
+  assert.equal(h.handled.length, 1);
+  assert.equal(h.statuses.at(-1).code, 'POLLING_STOPPED');
+});
+
+test('shutdown never masks an initial database read failure', async t => {
+  const { database } = await fixture(t);
+  const h = harness(database);
+  const failure = new Error('LOCAL_DATABASE_READ_FAILED');
+  h.options.database = { ...database, getOffset: async () => { h.controller.abort(); throw failure; } };
+  await assert.rejects(runPolling(h.options), error => error === failure);
+  assert.equal(h.calls.filter(call => call[0] === 'getUpdates').length, 0);
 });

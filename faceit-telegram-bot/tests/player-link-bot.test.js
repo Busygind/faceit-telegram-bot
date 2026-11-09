@@ -5,7 +5,7 @@ import { makeHarness } from './bot-harness.js';
 const binding = (bot, chatId = -10, userId = 1) => bot.store.getPlayerLink(chatId, userId);
 
 function imageResponses(bot, before, kind, nickname) {
-  assert.equal(bot.sent().length, before, 'last/stats never fall back to text');
+  assert.equal(bot.sent().length, before, 'successful last/stats reports do not include text');
   assert.equal(bot.renderedReports.at(-1).kind, kind);
   if (nickname) assert.equal(bot.renderedReports.at(-1).nickname, nickname);
   assert.ok(bot.sent('sendPhoto').every(photo => !Object.hasOwn(photo, 'caption')));
@@ -33,8 +33,10 @@ test('members bind only themselves; no-argument reports select the user and chat
     assert.equal(bot.sent('sendPhoto').at(-1).message_thread_id, 19);
   }
   await bot.send('/stats', { userId: 4 });
-  imageResponses(bot, textCount, 'notice');
-  assert.match(bot.renderedReports.at(-1).message, /\/setfaceit ник.*\/stats ник/);
+  assert.equal(bot.sent().length, textCount + 1);
+  assert.equal(bot.sent('sendPhoto').length, 3);
+  assert.match(bot.sent().at(-1).text, /\/setfaceit ник.*\/stats ник/);
+  assert.equal(bot.sent().at(-1).reply_markup, undefined);
   assert.equal(bot.starts.length, 6);
   assert.equal(await binding(bot, -10, 4), null);
 });
@@ -106,9 +108,11 @@ test('last/stats menu and legacy hint buttons use callback sender rather than th
   }
   const starts = bot.starts.length;
   await bot.click('stats', { userId: 4 });
-  imageResponses(bot, textCount, 'notice');
+  assert.equal(bot.sent().length, textCount + 1);
+  assert.equal(bot.sent('sendPhoto').length, 4);
   assert.equal(bot.starts.length, starts);
-  assert.match(bot.renderedReports.at(-1).message, /\/setfaceit/);
+  assert.match(bot.sent().at(-1).text, /\/setfaceit/);
+  assert.equal(bot.sent().at(-1).reply_markup, undefined);
 });
 
 test('replacement and deletion are self-only, chat-scoped and idempotent per update', async t => {
@@ -173,24 +177,29 @@ test('invalid or unavailable FACEIT never replaces the previous validated bindin
   }
   const textCount = bot.sent().length;
   await bot.send('/last');
-  imageResponses(bot, textCount, 'notice');
-  assert.match(bot.renderedReports.at(-1).message, /FACEIT временно недоступен/);
+  assert.equal(bot.sent().length, textCount + 1);
+  assert.equal(bot.sent('sendPhoto').length, 0);
+  assert.match(bot.sent().at(-1).text, /FACEIT временно недоступен/);
   assert.deepEqual(await binding(bot), original);
 });
 
-test('unbound, malformed and anonymous default reports remain image-only; forwarded defaults use the current sender', async t => {
+test('unbound, malformed and anonymous default reports fail in text; forwarded defaults use the current sender', async t => {
   const bot = await makeHarness(t);
   await bot.send('/setfaceit Mine');
   const textCount = bot.sent().length;
   for (const text of ['/last @Other', '/stats Other Person', '/last Other\nPlayer']) {
+    const before = bot.sent().length;
     await bot.send(text);
-    imageResponses(bot, textCount, 'notice');
+    assert.equal(bot.sent().length, before + 1);
+    assert.equal(bot.sent().at(-1).reply_markup, undefined);
   }
   await bot.send('/stats', { messageFields: { sender_chat: { id: -10 } } });
-  imageResponses(bot, textCount, 'notice');
-  assert.match(bot.renderedReports.at(-1).message, /своего аккаунта/);
+  assert.equal(bot.sent().length, textCount + 4);
+  assert.equal(bot.sent('sendPhoto').length, 0);
+  assert.equal(bot.renderedReports.length, 0);
+  assert.match(bot.sent().at(-1).text, /своего аккаунта/);
   assert.equal(bot.starts.length, 1);
   await bot.send('/last', { messageFields: { forward_origin: { type: 'user', sender_user: { id: 42 } } } });
-  imageResponses(bot, textCount, 'last', 'Mine');
+  imageResponses(bot, textCount + 4, 'last', 'Mine');
   assert.equal(bot.starts.at(-1).options.playerId, 'fixture-Mine');
 });
