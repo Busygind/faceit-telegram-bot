@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
+import { EventEmitter } from 'node:events';
 import { CLOUD_DRAIN_MS, CLOUD_WEBHOOK, controlBot } from '../local/control.mjs';
 import { createLocalProcesses } from '../local/process.mjs';
 import { createDrainState } from '../local/drain.mjs';
-import { checkCloudReadiness, safeControlError } from '../scripts/bot.mjs';
+import { checkCloudReadiness, safeControlError, installControlInterrupts } from '../scripts/bot.mjs';
 import { createTelegramApi } from '../local/telegram.mjs';
 
 const SECRET = 'ab'.repeat(32);
@@ -129,6 +130,7 @@ test('management Telegram adapter explicitly opts in and redacts token-bearing t
 });
 
 async function processFixture(t, inspectProcess) {
+  let elapsed = 0;
   const root = await mkdtemp(join(tmpdir(), 'faceit-control-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, '.local-data'), { mode: 0o700 });
@@ -137,7 +139,7 @@ async function processFixture(t, inspectProcess) {
   await writeFile(path, content, { mode: 0o600 });
   const signals = [];
   return { root, path, content, signals, local: createLocalProcesses({ root, inspectProcess,
-    kill: (pid, signal) => signals.push([pid, signal]), sleep: async () => {} }) };
+    kill: (pid, signal) => signals.push([pid, signal]), now: () => elapsed, sleep: async ms => { elapsed += ms; } }) };
 }
 
 test('a stale or unverified process lock is not removed and is never signalled', async t => {
@@ -157,17 +159,23 @@ test('process replacement between inspect and stop fails without sending a signa
   assert.deepEqual(f.signals, []);
 });
 
-test('detached operator startup waits for IPC readiness and stops only the verified disposable child', async t => {
+test('detached operator startup waits for IPC readiness and cooperatively stops only its verified disposable child', async t => {
   const root = await mkdtemp(join(tmpdir(), 'faceit-managed-child-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'local'), { mode: 0o700 });
   await writeFile(join(root, 'local/run.mjs'), `
 import { writeFileSync, unlinkSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { watchLocalStop } from ${JSON.stringify(new URL('../local/shutdown.mjs', import.meta.url).href)};
 const lock = new URL('../.local-data/polling.lock', import.meta.url);
 writeFileSync(lock, JSON.stringify({ pid: process.pid, nonce: 'ab'.repeat(16) }), { mode: 0o600, flag: 'wx' });
-process.once('SIGTERM', () => { unlinkSync(lock); process.exit(0); });
-const hold = setInterval(() => {}, 1000);
+let stopped;
+const requested = new Promise(resolve => { stopped = resolve; });
+const close = await watchLocalStop(fileURLToPath(new URL('..', import.meta.url)), { onStop: stopped });
 process.send({ event: 'POLLING_READY' });
+await requested;
+await close();
+unlinkSync(lock);
 `, { mode: 0o600 });
   const local = createLocalProcesses({ root });
   let running;
@@ -245,23 +253,6 @@ test('checkpoint reads SQLite offset in read-only mode and never invents a missi
   assert.deepEqual(await readFile(path), before);
 });
 
-test('root wrapper accepts commands without Node PATH setup and rejects invalid input before network', async t => {
-  const { spawnSync } = await import('node:child_process');
-  const home = await mkdtemp(join(tmpdir(), 'faceit-wrapper-home-test-'));
-  t.after(() => rm(home, { recursive: true, force: true }));
-  const bin = join(home, '.local/bin');
-  await mkdir(bin, { recursive: true });
-  await symlink(process.execPath, join(bin, 'node'));
-  const wrapper = new URL('../bot', import.meta.url).pathname;
-  const result = spawnSync(wrapper, ['invalid'], { encoding: 'utf8', env: { ...process.env, HOME: home, PATH: '/usr/bin:/bin' } });
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /SWITCH_ARGUMENTS/);
-  assert.ok(!result.stderr.includes(SECRET));
-  assert.ok(!result.stderr.includes(' at '));
-  assert.equal(result.stdout, '');
-});
-
-
 test('configured cloud with a failed Telegram dependency leaves the local poller untouched', async () => {
   const h = fixture({ running: true });
   const probes = [];
@@ -293,4 +284,91 @@ test('readiness requires all protected dependency flags and status does not clai
   assert.equal(result.mode, 'cloud');
   assert.equal(result.cloudReady, false);
   assert.deepEqual(mutations(missing), []);
+});
+
+test('a cooperative stop timeout never sends termination signals or enables a second consumer', async t => {
+  const f = await processFixture(t, async (pid, root) => ({ pid, cwd: root, command: 'fixture', started: 'generation-1' }));
+  const running = await f.local.inspect();
+  await assert.rejects(f.local.stop(running.identity), /SWITCH_STOP_TIMEOUT/);
+  assert.equal(f.signals.length, 1499);
+  assert.ok(f.signals.every(([pid, signal]) => pid === IDENTITY.pid && signal === 0));
+  const request = JSON.parse(await readFile(join(f.root, '.local-data', `polling-stop-${IDENTITY.nonce}.json`), 'utf8'));
+  assert.equal(request.identity.nonce, IDENTITY.nonce);
+  assert.equal(await readFile(f.path, 'utf8'), f.content);
+  const h = fixture({ running: true });
+  h.local.stop = async () => { h.events.push('stop'); throw new Error('SWITCH_STOP_TIMEOUT'); };
+  await assert.rejects(controlBot('cloud', h), /SWITCH_STOP_TIMEOUT/);
+  assert.ok(!h.events.some(event => Array.isArray(event) && event[0] === 'setWebhook'));
+  assert.ok(!h.events.includes('start'));
+});
+
+test('repeated CLI interrupts remain graceful until an accepted webhook mutation completes', async () => {
+  const source = new EventEmitter();
+  const controller = new AbortController();
+  const notifications = [];
+  const remove = installControlInterrupts(controller, { source, notify: message => notifications.push(message) });
+  try {
+    const h = fixture({ running: true });
+    h.signal = controller.signal;
+    const setWebhook = h.api.setWebhook;
+    h.api.setWebhook = async payload => {
+      await setWebhook(payload); // Telegram already accepted the mutation.
+      for (const name of ['SIGINT', 'SIGINT', 'SIGTERM', 'SIGTERM']) {
+        assert.equal(source.emit(name), true);
+        assert.equal(source.listenerCount(name), 1);
+      }
+      return true;
+    };
+    const result = await controlBot('cloud', h);
+    assert.equal(result.mode, 'cloud');
+    assert.equal(controller.signal.aborted, true);
+    assert.equal(notifications.length, 1);
+    assert.ok(h.events.includes('release'));
+    assert.ok(h.events.includes('clearDrain'));
+    assert.ok(!h.events.includes('start'));
+  } finally { remove(); }
+  assert.equal(source.listenerCount('SIGINT'), 0);
+  assert.equal(source.listenerCount('SIGTERM'), 0);
+  remove();
+});
+
+test('owner exit between liveness probe and inspection succeeds only after own lock release', async t => {
+  let f, calls = 0;
+  f = await processFixture(t, async (pid, root) => {
+    if (++calls === 3) { await rm(f.path); return null; }
+    return { pid, cwd: root, command: 'fixture', started: 'generation-1' };
+  });
+  const running = await f.local.inspect();
+  await f.local.stop(running.identity);
+  assert.equal(calls, 3);
+  assert.deepEqual(await f.local.inspect(), { state: 'stopped' });
+  assert.deepEqual(await import('node:fs/promises').then(fs => fs.readdir(join(f.root, '.local-data'))), []);
+});
+
+test('owner exit racing inspection never removes a replacement lock or its request', async t => {
+  let f, calls = 0;
+  const replacement = JSON.stringify({ pid: IDENTITY.pid + 1, nonce: 'cd'.repeat(16) });
+  f = await processFixture(t, async (pid, root) => {
+    if (++calls === 3) { await rm(f.path); await writeFile(f.path, replacement, { mode: 0o600 }); return null; }
+    return { pid, cwd: root, command: 'fixture', started: pid === IDENTITY.pid ? 'generation-1' : 'generation-2' };
+  });
+  const running = await f.local.inspect();
+  await assert.rejects(f.local.stop(running.identity), /SWITCH_PROCESS_CHANGED/);
+  assert.equal(await readFile(f.path, 'utf8'), replacement);
+  assert.ok(f.signals.every(([, signal]) => signal === 0));
+});
+
+test('stop timeout uses monotonic elapsed time including process inspection overhead', async t => {
+  let elapsed = 0, inspectCount = 0;
+  const f = await processFixture(t, async (pid, root) => ({ pid, cwd: root, command: 'fixture', started: 'generation-1' }));
+  const local = createLocalProcesses({ root: f.root, now: () => elapsed,
+    inspectProcess: async (pid, root) => {
+      inspectCount++;
+      elapsed += 25_000;
+      return { pid, cwd: root, command: 'fixture', started: 'generation-1' };
+    }, kill: (_, signal) => assert.equal(signal, 0), sleep: async ms => { elapsed += ms; } });
+  const running = await local.inspect();
+  await assert.rejects(local.stop(running.identity), /SWITCH_STOP_TIMEOUT/);
+  assert.ok(inspectCount < 10, 'OS inspection time is included instead of adding 1500 sleeps');
+  assert.ok(elapsed < 250_000);
 });

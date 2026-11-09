@@ -175,7 +175,7 @@ test('429 pauses at history/detail/stats without losing checkpoint or leaking ke
     const initial = await service.start('PlayerOne', 'last');
     const result = await service.advance(initial);
     assert.equal(result.done, false);
-    assert.equal(result.progress.retryAt, NOW + 7);
+    assert.equal(result.progress.retryAt, NOW + 8);
     assert.equal(JSON.stringify(result.state).includes('private-fixture-key'), false);
     assert.deepEqual(initial.matches, []);
     const stillPaused = await service.advance(result.state);

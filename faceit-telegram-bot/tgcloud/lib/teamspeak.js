@@ -2,20 +2,28 @@ export class InputError extends Error {
   constructor(code) { super(code); this.code = code; }
 }
 
+const DEFAULT_VOICE_PORT = 9987;
+
 function validIpv6(value) {
   if (!/^[0-9a-f:]+$/i.test(value) || !value.includes(':')) return false;
-  const compressed = value.includes('::');
-  if (value.includes(':::') || value.split('::').length > 2) return false;
-  const groups = value.split(':').filter(Boolean);
+  const halves = value.split('::');
+  if (halves.length > 2) return false;
+  const groups = halves.flatMap((half) => half ? half.split(':') : []);
   if (!groups.every((group) => /^[0-9a-f]{1,4}$/i.test(group))) return false;
-  if (compressed) return groups.length < 8;
-  return groups.length === 8 && !value.startsWith(':') && !value.endsWith(':');
+  return halves.length === 2 ? groups.length < 8 : groups.length === 8;
 }
 
 export function validateAddress(address) {
-  if (address.length > 270) throw new InputError('TS_ADDRESS');
-  const match = /^(\[[0-9a-f:]+\]|[^\s/:?#@]+):(\d{1,5})$/i.exec(address);
-  if (!match || +match[2] < 1 || +match[2] > 65535) throw new InputError('TS_ADDRESS');
+  if (typeof address !== 'string' || !address || address.length > 270 || /[\s\x00-\x1f\x7f]/.test(address)) {
+    throw new InputError('TS_ADDRESS');
+  }
+  if (!address.startsWith('[') && address.split(':').length > 2) {
+    if (!validIpv6(address)) throw new InputError('TS_ADDRESS');
+    return `[${address.toLowerCase()}]:${DEFAULT_VOICE_PORT}`;
+  }
+  const match = /^(\[[0-9a-f:]+\]|[^\s/:?#@\[\]]+)(?::(\d{1,5}))?$/i.exec(address);
+  const port = match?.[2] == null ? DEFAULT_VOICE_PORT : +match[2];
+  if (!match || port < 1 || port > 65535) throw new InputError('TS_ADDRESS');
   const host = match[1];
   if (host.startsWith('[')) {
     if (!validIpv6(host.slice(1, -1))) throw new InputError('TS_ADDRESS');
@@ -27,7 +35,20 @@ export function validateAddress(address) {
   } else if (host.length > 253 || !host.split('.').every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label))) {
     throw new InputError('TS_ADDRESS');
   }
-  return `${host.toLowerCase()}:${+match[2]}`;
+  return `${host.toLowerCase()}:${port}`;
+}
+
+// Validate before hiding the standard suffix: the final group of an unbracketed
+// IPv6 address can itself be 9987 and must never be mistaken for a connection setting.
+export function displayTeamspeakAddress(address) {
+  let normalized;
+  try { normalized = validateAddress(address); }
+  catch (error) {
+    if (error instanceof InputError) return address;
+    throw error;
+  }
+  const standardSuffix = `:${DEFAULT_VOICE_PORT}`;
+  return normalized.endsWith(standardSuffix) ? normalized.slice(0, -standardSuffix.length) : normalized;
 }
 
 export function parseTeamspeak(args) {

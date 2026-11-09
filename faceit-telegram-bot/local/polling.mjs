@@ -90,23 +90,25 @@ export async function runPolling({ api, bot, database, signal, sleep = defaultSl
         if (update.update_id < offset) continue;
         for (let attempt = 1; ; attempt++) {
           try {
+            if (signal?.aborted) throw STOPPED;
             if (update.message) await bot.handleMessage(update.message, { update });
             else if (update.callback_query) await bot.handleCallback(update.callback_query, { update });
             break;
           } catch (error) {
-            if (signal?.aborted || error === STOPPED) throw STOPPED;
-            if (attempt >= 3) throw new Error('POLLING_HANDLER_FAILED');
+            if (error === STOPPED) throw STOPPED;
+            if (signal?.aborted || attempt >= 3) throw new Error('POLLING_HANDLER_FAILED');
             const delayMs = 1000 * 2 ** (attempt - 1);
             onStatus({ code: 'HANDLER_RETRY', delayMs, attempt });
             await pause(delayMs);
           }
         }
-        if (signal?.aborted) throw STOPPED;
+        // A stop request cancels only polling, never an in-flight handler.
+        // Persist its completed delivery before yielding ownership of the queue.
         offset = update.update_id + 1;
         await database.setOffset(offset);
       }
     }
   } catch (error) {
-    if (error !== STOPPED && !signal?.aborted) throw error;
+    if (error !== STOPPED) throw error;
   } finally { onStatus({ code: 'POLLING_STOPPED' }); }
 }

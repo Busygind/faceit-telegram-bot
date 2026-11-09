@@ -109,7 +109,7 @@ test('absolute invocation deadline blocks new egress after awaited D1 operations
   assert.equal(method,'getChatMember');return Response.json({ok:true,result:{status:'administrator'}});
  }});
  await assert.rejects(runtime(menuUpdate(810)));
- assert.deepEqual(methods,['getChatMember']);assert.equal(timer.callbacks[0].milliseconds,CLOUD_HANDLER_MS);assert.deepEqual(timer.cleared,[0]);
+ assert.deepEqual(methods,['getChatMember']);assert.equal(timer.callbacks[0].milliseconds,CLOUD_HANDLER_MS);assert.deepEqual(timer.cleared,[0,1]);
 });
 test('deadline aborts an already pending HTTP request and prevents fallback egress',async t=>{
  const {binding}=database(t);const timer=fakeTimer();let signal;let calls=0;
@@ -133,7 +133,7 @@ test('concurrent updates have independent deadline controllers and retain awaite
  const first=runtime(menuUpdate(812,1)).then(()=>false,()=>true);const second=runtime(menuUpdate(813,2));
  await new Promise(resolve=>setImmediate(resolve));assert.equal(members.size,2);
  timer.callbacks[0].callback();assert.equal(await first,true);assert.equal(members.get(2).signal.aborted,false);
- members.get(2).resolve();await second;assert.equal(members.get(2).signal.aborted,true);assert.deepEqual(timer.cleared.sort(),[0,1]);
+ members.get(2).resolve();await second;assert.equal(members.get(2).signal.aborted,true);assert.deepEqual(timer.cleared.sort(),[0,1,2,3]);
 });
 test('webhook body read consumes the original 90-second budget and cannot restart it',async t=>{
  const {binding}=database(t);let clock=0;let calls=0;let body;
@@ -195,7 +195,9 @@ function coldStatsWithClock(t, { initialDelay = 0, readMs = 450, rateLimit = fal
    const method=target.pathname.split('/').at(-1);methods.push({method,started});clock+=250;
    if(method==='getMe')return Response.json({ok:true,result:{id:999,username:'road_to_3_elo_bot'}});
    if(method==='getChatMember')return Response.json({ok:true,result:{status:'member'}});
-   assert.equal(method,'sendPhoto');assert.ok(options.body instanceof FormData);assert.equal(options.body.get('caption'),null);
+   assert.ok(['sendPhoto','sendMessage'].includes(method));
+   if(method==='sendPhoto'){assert.ok(options.body instanceof FormData);assert.equal(options.body.get('caption'),null);}
+   else{const params=JSON.parse(options.body);assert.doesNotMatch(params.text,/Продолжить|Сохранила прогресс/);}
    return Response.json({ok:true,result:{message_id:99}});
   }
   assert.equal(target.origin,'https://open.faceit.com');calls.push({path:target.pathname,started});clock+=readMs;
@@ -227,15 +229,20 @@ test('work budget includes initial webhook delay and stops new FACEIT reads befo
  assert.ok(h.calls.length>2 && h.calls.length<62);
  assert.ok(h.calls.every(c=>c.started<h.base+65000));
  const row=h.sql.prepare('SELECT status,state FROM report_jobs').get();assert.equal(row.status,'pending');assert.ok(JSON.parse(row.state).matches.length<30);
- const photo=h.methods.find(x=>x.method==='sendPhoto');assert.ok(photo);assert.ok(photo.started<h.base+CLOUD_HANDLER_MS);
+ const refusal=h.methods.find(x=>x.method==='sendMessage');assert.ok(refusal);assert.ok(refusal.started<h.base+CLOUD_HANDLER_MS);
+ assert.equal(h.methods.some(x=>x.method==='sendPhoto'),false);
  assert.ok(h.clock()<h.base+CLOUD_HANDLER_MS);
- assert.equal(h.sql.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE kind='notice' AND status='sent'").get().n,1);
+ assert.equal(h.methods.filter(x=>x.method==='sendMessage').length,1);
+ assert.equal(h.methods.some(x=>x.method==='sendPhoto'),false);
+ assert.equal(h.sql.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE kind='notice'").get().n,0);
 });
 
-test('expanded cloud budget still checkpoints and pauses immediately for FACEIT Retry-After',async t=>{
+test('cloud preserves a checkpoint and sends one text refusal when Retry-After cannot fit the work budget',async t=>{
  const h=coldStatsWithClock(t,{rateLimit:true});await h.run();
  const row=h.sql.prepare('SELECT status,state FROM report_jobs').get();const state=JSON.parse(row.state);
  assert.equal(row.status,'pending');assert.equal(h.calls.filter(c=>c.path.endsWith('/stats')).length,1);
  assert.ok(state.retryAt>Math.floor(h.clock()/1000));assert.equal(state.phase,'stats');
- assert.equal(h.sql.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE kind='notice' AND status='sent'").get().n,1);
+ assert.equal(h.methods.filter(x=>x.method==='sendMessage').length,1);
+ assert.equal(h.methods.some(x=>x.method==='sendPhoto'),false);
+ assert.equal(h.sql.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE kind='notice'").get().n,0);
 });

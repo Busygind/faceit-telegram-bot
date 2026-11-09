@@ -68,16 +68,22 @@ export async function main(args, { root = ROOT, fetch = globalThis.fetch, signal
   } finally { if (release) await release(); }
 }
 
+/** Repeated interrupts remain a drain request while a webhook mutation finishes. */
+export function installControlInterrupts(controller, { source = process, notify = message => console.error(message) } = {}) {
+  const stop = () => {
+    if (!controller.signal.aborted) notify('Interrupt requested; waiting for a safe point and releasing this command’s locks.');
+    controller.abort();
+  };
+  source.on('SIGINT', stop); source.on('SIGTERM', stop);
+  return () => { source.removeListener('SIGINT', stop); source.removeListener('SIGTERM', stop); };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   process.umask(0o077);
   const controller = new AbortController();
-  const stop = () => {
-    if (!controller.signal.aborted) console.error('Interrupt requested; waiting for a safe point and releasing this command’s locks.');
-    controller.abort();
-  };
-  process.once('SIGINT', stop); process.once('SIGTERM', stop);
+  const removeInterrupts = installControlInterrupts(controller);
   main(process.argv.slice(2), { signal: controller.signal }).then(result => console.log(JSON.stringify(result))).catch(error => {
     console.error(`Bot control: ${safeControlError(error)}. No secret values printed.`);
     process.exitCode = 1;
-  }).finally(() => { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); });
+  }).finally(removeInterrupts);
 }

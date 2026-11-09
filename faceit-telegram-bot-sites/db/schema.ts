@@ -20,3 +20,16 @@ export const playerLinks = sqliteTable('player_links', {
   chat_id: integer('chat_id').notNull(), user_id: integer('user_id').notNull(),
   player_id: text('player_id').notNull(), nickname: text('nickname').notNull(), updated_at: integer('updated_at').notNull(),
 }, table => [uniqueIndex('idx_player_links_chat_user').on(table.chat_id, table.user_id)]);
+
+export const pollState = sqliteTable('poll_state', {
+  chat_id: integer('chat_id').primaryKey(), original_message_id: integer('original_message_id'),
+  poll_id: text('poll_id'), created_at: integer('created_at'), latest_message_id: integer('latest_message_id'),
+  pinned_message_id: integer('pinned_message_id'), pending_unpin_ids: text('pending_unpin_ids').notNull().default('[]'),
+  owner_request_id: text('owner_request_id'), phase: text('phase').notNull().default('idle'),
+  lease_until: integer('lease_until').notNull().default(0), unknown_until: integer('unknown_until').notNull().default(0),
+  updated_at: integer('updated_at').notNull(),
+});
+export const pollRequests = sqliteTable('poll_requests', {
+  request_id: text('request_id').primaryKey(), chat_id: integer('chat_id').notNull(),
+  status: text('status').notNull(), updated_at: integer('updated_at').notNull(),
+}, table => [index('idx_poll_requests_updated').on(table.updated_at)]);

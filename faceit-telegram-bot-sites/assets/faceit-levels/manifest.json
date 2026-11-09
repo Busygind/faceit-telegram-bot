@@ -1,0 +1,117 @@
+{
+  "sourceArticle": "https://support.faceit.com/hc/en-us/articles/10525200579740-FACEIT-CS2-Elo-and-skill-levels",
+  "retrievedAt": "2026-10-16",
+  "provenance": "Original FACEIT support article PNG attachments, stored unchanged. FACEIT trademarks and artwork remain the property of their owners.",
+  "assets": [
+    {
+      "level": 1,
+      "file": "level-1.png",
+      "source": "https://support.faceit.com/hc/article_attachments/10525200575516",
+      "sha256": "30cc1922a738b15718e257b2c1b198fc43929e803abb61835bb9d4f3e9097f1b",
+      "bytes": 1246,
+      "width": 38,
+      "height": 38,
+      "bitDepth": 8,
+      "colorType": 6
+    },
+    {
+      "level": 2,
+      "file": "level-2.png",
+      "source": "https://support.faceit.com/hc/article_attachments/10525189649308",
+      "sha256": "3642c4d694d19317c1aaf61cc46b1226fbf0e4f2923dbeb0ed8185d1380bcb11",
+      "bytes": 1384,
+      "width": 38,
+      "height": 38,
+      "bitDepth": 8,
+      "colorType": 6
+    },
+    {
+      "level": 3,
+      "file": "level-3.png",
+      "source": "https://support.faceit.com/hc/article_attachments/10525200576796",
+      "sha256": "8129d1ede7fc5636d985000ae4e4a7b4f143ac9405f5ac5a03c0d1f28b39afe5",
+      "bytes": 1415,
+      "width": 38,
+      "height": 38,
+      "bitDepth": 8,
+      "colorType": 6
+    },
+    {
+      "level": 4,
+      "file": "level-4.png",
+      "source": "https://support.faceit.com/hc/article_attachments/10525185037724",
+      "sha256": "f393cedf710841694929572ab2008dad01c5d3711b732c00cb932483ee6fa347",
+      "bytes": 1431,
+      "width": 38,
+      "height": 38,
+      "bitDepth": 8,
+      "colorType": 6
+    },
+    {
+      "level": 5,
+      "file": "level-5.png",
+      "source": "https://support.faceit.com/hc/article_attachments/10525215800860",
+      "sha256": "e4b1bee20e472ff7c56f58b10981125f35d6b7b6a9dc855d3ab19fe22eadeaf7",
+      "bytes": 1464,
+      "width": 38,
+      "height": 38,
+      "bitDepth": 8,
+      "colorType": 6
+    },
+    {
+      "level": 6,
+      "file": "level-6.png",
+      "source": "https://support.faceit.com/hc/article_attachments/10525245409692",
+      "sha256": "9bc86fbe4a52e65be32adc4b708417690f9b7f43393214e2608dae09d423d56c",
+      "bytes": 1490,
+      "width": 38,
+      "height": 38,
+      "bitDepth": 8,
+      "colorType": 6
+    },
+    {
+      "level": 7,
+      "file": "level-7.png",
+      "source": "https://support.faceit.com/hc/article_attachments/10525185034012",
+      "sha256": "d5d6171f8e36e4bc680c3a1b4e5f49a593f2107d726e0ed471002cb9ae5e2afe",
+      "bytes": 1499,
+      "width": 38,
+      "height": 38,
+      "bitDepth": 8,
+      "colorType": 6
+    },
+    {
+      "level": 8,
+      "file": "level-8.png",
+      "source": "https://support.faceit.com/hc/article_attachments/10525189648796",
+      "sha256": "30f3ff7471379fd0dc934cf79d66fe170bc476cc5e7b06de391a7ac8c8ea70e1",
+      "bytes": 1511,
+      "width": 38,
+      "height": 38,
+      "bitDepth": 8,
+      "colorType": 6
+    },
+    {
+      "level": 9,
+      "file": "level-9.png",
+      "source": "https://support.faceit.com/hc/article_attachments/10525200576028",
+      "sha256": "df8c5b634649d9a1995b6237804f97ed4986a1476b2e2e7afdf5cf6c23c2b50b",
+      "bytes": 1484,
+      "width": 38,
+      "height": 38,
+      "bitDepth": 8,
+      "colorType": 6
+    },
+    {
+      "level": 10,
+      "file": "level-10.png",
+      "source": "https://support.faceit.com/hc/article_attachments/10525189646876",
+      "sha256": "b4a077cc9141f61c412e20b04712d767ad1a358bf6d38f7e470882e3360a42a4",
+      "bytes": 1449,
+      "width": 38,
+      "height": 38,
+      "bitDepth": 8,
+      "colorType": 6
+    }
+  ]
+}

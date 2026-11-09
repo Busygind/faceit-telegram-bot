@@ -8,6 +8,7 @@ const NOW = 1_800_000_000;
 test('real workerd native D1 persists chat-scoped personal links across requests, replacement, deletion and transient cleanup', async t => {
   const storeSource = await readFile(new URL('../bot/core/store.js', import.meta.url), 'utf8');
   const adapterSource = await readFile(new URL('../bot/d1.mjs', import.meta.url), 'utf8');
+  const windowSource = await readFile(new URL('../bot/core/poll-window.js', import.meta.url), 'utf8');
   const fetchMock = createFetchMock();
   fetchMock.disableNetConnect();
   const worker = new Miniflare({
@@ -51,6 +52,7 @@ test('real workerd native D1 persists chat-scoped personal links across requests
       } };
     ` },
     { type: 'ESModule', path: '/player-links-worker-fixture/store.js', contents: storeSource },
+    { type: 'ESModule', path: '/player-links-worker-fixture/poll-window.js', contents: windowSource },
     { type: 'ESModule', path: '/player-links-worker-fixture/d1.mjs', contents: adapterSource }],
   });
   t.after(async () => { await worker.dispose(); await fetchMock.close(); });

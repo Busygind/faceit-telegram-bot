@@ -77,7 +77,7 @@ test('fresh nickname, ELO, level, player, complete selected metadata/order, kind
     const fresh = structuredClone(s); edit(fresh);
     assert.equal(await h.cache.get(fresh), null);
   }
-  for (const options of [{ botToken: 'different-token' }, { faceitKey: 'different-key' }, { rendererScope: 'faceit-dark-v2/core-schema-v1' }]) {
+  for (const options of [{ botToken: 'different-token' }, { faceitKey: 'different-key' }, { rendererScope: 'faceit-dark-v1/core-schema-v1' }]) {
     assert.equal(await createReportCache({ ...h.config, ...options }).get(s), null);
   }
   const equivalent = structuredClone(s);
@@ -200,4 +200,15 @@ test('a database read crossing the expiration boundary does not serve an already
   } } });
   assert.equal(await delayed.get(s), null);
   assert.deepEqual(h.events.at(-1), { event: 'miss', kind: 'stats' });
+});
+
+test('new badge renderer never reuses a legacy template file_id from persisted report cache', async t => {
+  const h = memory(t); const s = state(); const report = buildReport(s, NOW);
+  const legacy = createReportCache({ ...h.config, rendererScope: 'faceit-dark-v1/core-schema-v1' });
+  await legacy.put(s, report, FILE_ID);
+  assert.equal(await h.cache.get(s), null);
+  await h.cache.put(s, report, 'badge_template_fixture');
+  assert.equal((await h.cache.get(s)).fileId, 'badge_template_fixture');
+  assert.equal((await legacy.get(s)).fileId, FILE_ID);
+  assert.notEqual(h.cache.rendererScope, legacy.rendererScope);
 });

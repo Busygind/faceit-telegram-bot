@@ -14,7 +14,7 @@ export function fixtureReport(kind = 'stats', nickname = 'PlayerOne') {
 }
 
 export async function makeHarness(t, options = {}) {
-  const { store, db } = await makeStore();
+  const { store, db } = await makeStore(options.now ?? (() => 1800000000));
   t.after(() => db.close());
   const calls = [];
   const starts = [];
@@ -27,6 +27,9 @@ export async function makeHarness(t, options = {}) {
     sendMessage: () => ({ message_id: ++id }),
     sendPhoto: () => ({ message_id: ++id }),
     sendPoll: () => ({ message_id: ++id, poll: { id: 'fixture-poll' } }),
+    forwardMessage: () => ({ message_id: ++id, poll: { id: 'fixture-poll' } }),
+    pinChatMessage: () => true,
+    unpinChatMessage: () => true,
     deleteMessage: () => true,
     answerCallbackQuery: () => true,
     setMyCommands: () => true,

@@ -105,7 +105,9 @@ test('removed and kicked users cannot use commands or buttons in newly added gro
   assert.equal(bot.sent('sendPoll').length, 0);
   assert.equal((await bot.db.all('SELECT * FROM chat_settings')).length, 0);
   assert.equal((await bot.db.all('SELECT * FROM player_links')).length, 0);
-  assert.ok(bot.renderedReports.every(({ kind, title }) => kind === 'notice' && title === 'Нет доступа'));
+  assert.equal(bot.renderedReports.length, 0);
+  assert.equal(bot.sent('sendPhoto').length, 0);
+  assert.ok(bot.sent().every(({ text }) => /Не могу подтвердить членство/.test(text)));
 });
 
 test('only Telegram group migration service fields move settings, retire old ids and preserve chat isolation', async (t) => {
@@ -213,22 +215,26 @@ test('unbound FACEIT commands request a nickname and wrong bot mentions are igno
   await bot.send('/teamstats');
   assert.deepEqual(bot.starts, [{ nickname: 'PlayerOne', kind: 'last' }]);
   await bot.click('hint:stats');
-  assert.equal(bot.renderedReports.at(-1).kind, 'notice');
-  assert.match(bot.renderedReports.at(-1).message, /Сначала сохраните свой ник: \/setfaceit/);
+  assert.equal(bot.renderedReports.length, 1);
+  assert.match(bot.sent().at(-1).text, /Сначала сохраните свой ник: \/setfaceit/);
+  assert.equal(bot.sent().at(-1).reply_markup, undefined);
   assert.ok(!(await bot.db.all("SELECT name FROM sqlite_master WHERE type='table'"))
     .some((row) => /roster|players|identities/.test(row.name)));
 });
 
-test('continuation is persisted across bot invocations and bound to its chat and forum topic', async (t) => {
-  const bot = await makeHarness(t, { faceitOverrides: {
+test('legacy continuation is persisted across bot invocations and bound to its chat and forum topic', async (t) => {
+  const bot = await makeHarness(t, { settings: { autoAdvanceBatches: 1 }, faceitOverrides: {
     start: (nickname, kind) => ({ nickname, kind, phase: 'history', step: 0 }),
     advance: (state) => state.step === 0
       ? { done: false, state: { ...state, step: 1 }, progress: { message: '1 из 30' } }
       : { done: true, state: { ...state, phase: 'done' }, report: fixtureReport(state.kind, state.nickname) },
   } });
   await bot.send('/stats ExplicitNick', { topicId: 7 });
-  const continuation = bot.sent('sendPhoto').at(-1).reply_markup.inline_keyboard[0][0].callback_data;
-  assert.match(continuation, /^continue:/);
+  assert.equal(bot.sent('sendPhoto').length, 0);
+  assert.equal(bot.sent().length, 1);
+  assert.equal(bot.sent()[0].reply_markup, undefined);
+  const pending = await bot.db.get('SELECT * FROM report_jobs');
+  const continuation = `continue:${pending.job_id}`;
   assert.equal((await bot.store.getJob(continuation.slice(9))).state.step, 1);
   await bot.click(continuation, { chatId: -1004418477887, topicId: 7 });
   await bot.click(continuation, { chatId: -10, topicId: 8 });
@@ -242,7 +248,8 @@ test('continuation is persisted across bot invocations and bound to its chat and
   const photoCount = bot.sent('sendPhoto').length;
   await bot.click(continuation, { chatId: -10, topicId: 7 });
   assert.equal(bot.sent('sendPhoto').length, photoCount);
-  assert.equal(bot.sent().length, 0);
+  assert.equal(bot.sent().length, 3);
+  assert.ok(bot.sent().every(message => !message.reply_markup));
 });
 
 test('ready checkpoint resumes an interrupted delivery without retrying a claimed photo', async (t) => {
@@ -265,16 +272,18 @@ test('unresolvable dense history stops honestly without an infinite continue but
     progress: { reason: 'HISTORY_DENSITY_UNRESOLVED' },
   }) } });
   await bot.send('/stats DenseHistory');
-  assert.match(bot.renderedReports.at(-1).message, /история слишком плотная/);
-  assert.ok(!bot.sent('sendPhoto').at(-1).reply_markup.inline_keyboard.flat()
-    .some((button) => button.callback_data.startsWith('continue:')));
+  assert.match(bot.sent().at(-1).text, /история слишком плотная/i);
+  assert.equal(bot.sent().at(-1).reply_markup, undefined);
+  assert.equal(bot.sent('sendPhoto').length, 0);
+  assert.equal(bot.renderedReports.length, 0);
   const job = await bot.db.get('SELECT * FROM report_jobs');
   assert.equal(job.status, 'blocked');
   bot.restart();
   await bot.click(`continue:${job.job_id}`);
   assert.equal(bot.advances.length, 1);
-  assert.match(bot.renderedReports.at(-1).message, /Неполную выборку не выдаю за полную/);
-  assert.equal(bot.sent().length, 0);
+  assert.match(bot.sent().at(-1).text, /Неполную выборку не выдаю за полную/);
+  assert.equal(bot.sent().length, 2);
+  assert.equal(bot.sent().at(-1).reply_markup, undefined);
 });
 
 test('safe FACEIT errors are actionable but do not publish raw exception text', async (t) => {
@@ -288,19 +297,22 @@ test('safe FACEIT errors are actionable but do not publish raw exception text', 
       throw Object.assign(new Error('SECRET_MUST_NOT_BE_PUBLISHED'), { code });
     } } });
     await bot.send('/last Nick');
-    assert.match(bot.renderedReports.at(-1).message, expected);
-    assert.ok(!bot.renderedReports.at(-1).message.includes('SECRET_MUST_NOT_BE_PUBLISHED'));
-    assert.equal(bot.sent().length, 0);
-    assert.equal(bot.sent('sendPhoto').length, 1);
+    assert.match(bot.sent().at(-1).text, expected);
+    assert.ok(!bot.sent().at(-1).text.includes('SECRET_MUST_NOT_BE_PUBLISHED'));
+    assert.equal(bot.sent().length, 1);
+    assert.equal(bot.sent().at(-1).reply_markup, undefined);
+    assert.equal(bot.sent('sendPhoto').length, 0);
+    assert.equal(bot.renderedReports.length, 0);
   }
 });
 
-test('double card render failure stays image-only; ambiguous photo has no automatic retry', async (t) => {
+test('card render failure returns final text; ambiguous photo has no automatic retry or text fallback', async (t) => {
   const fallback = await makeHarness(t, { renderCard: () => { throw new Error('render'); } });
   await fallback.send('/stats Nick');
   assert.equal(fallback.sent('sendPhoto').length, 0);
-  assert.equal(fallback.sent().length, 0);
-  assert.deepEqual(fallback.renderedReports.map(report => report.kind), ['stats', 'notice']);
+  assert.equal(fallback.sent().length, 1);
+  assert.equal(fallback.sent()[0].reply_markup, undefined);
+  assert.deepEqual(fallback.renderedReports.map(report => report.kind), ['stats']);
   assert.equal((await fallback.db.get("SELECT * FROM deliveries WHERE kind='photo'")).status, 'rejected');
   const uncertain = await makeHarness(t, {
     renderCard: () => new Uint8Array([1, 2, 3]),

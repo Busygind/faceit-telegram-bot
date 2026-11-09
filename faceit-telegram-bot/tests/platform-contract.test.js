@@ -36,7 +36,7 @@ registerHooks({
 test('deployed schema and local SQLite contract have exactly matching tables/columns/types', async (t) => {
   const { db } = await makeStore(); t.after(() => db.close());
   await import('../tgcloud/schema.js');
-  assert.equal(tables.length, 4);
+  assert.equal(tables.length, 6);
   for (const table of tables) {
     const actual = await db.all(`PRAGMA table_info(${table.name})`);
     assert.deepEqual(actual.map(({ name, type }) => ({ name, type })), Object.values(table.columns).map(({ name, type }) => ({ name, type })));
@@ -61,10 +61,10 @@ test('actual deployed message/callback entrypoints load and use only the SDK con
   const handler = (await import('../tgcloud/handlers/message.js')).default;
   await handler({ chat: { id: -100, type: 'supergroup' }, from: { id: 1 }, text: '/stats@test_bot', message_id: 1 }, { update: { update_id: 1 } });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].text, undefined);
+  assert.match(calls[0].text, /Сначала сохраните свой ник: \/setfaceit/);
   assert.equal(calls[0].caption, undefined);
-  assert.equal(calls[0].photo.name, 'faceit-status.png');
-  assert.deepEqual([...calls[0].photo.bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+  assert.equal(calls[0].photo, undefined);
+  assert.equal(calls[0].reply_markup, undefined);
   const callback = (await import('../tgcloud/handlers/callback_query.js')).default;
   await callback({ id: 'q', from: { id: 1 }, data: 'hint:setts', message: { chat: { id: -100, type: 'supergroup' } } }, { update: { update_id: 2 } });
   assert.match(calls.at(-1).text, /Настройка только для этой группы/);

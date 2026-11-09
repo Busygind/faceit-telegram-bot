@@ -17,8 +17,19 @@ function stepsUntilDone(count, observe = () => {}) {
   };
 }
 
-function hasContinue(message) {
-  return message.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('continue:')) ?? false;
+function noContinuation(bot) {
+  for (const message of [...bot.sent(), ...bot.sent('sendPhoto')]) {
+    assert.ok(!message.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('continue:')));
+  }
+  assert.ok(bot.renderedReports.every(report => report.kind !== 'notice'));
+}
+
+function finalRefusal(bot, count = 1) {
+  assert.equal(bot.sent().length, count);
+  assert.equal(bot.sent('sendPhoto').length, 0);
+  assert.equal(bot.renderedReports.length, 0);
+  assert.ok(bot.sent().every(message => typeof message.text === 'string' && !message.reply_markup));
+  noContinuation(bot);
 }
 
 test('local stats completes more than eight checkpoints in one slash command and delivers once', async t => {
@@ -41,7 +52,7 @@ test('local stats completes more than eight checkpoints in one slash command and
   assert.equal(bot.sent().length, 0);
   assert.equal(bot.renderedReports.length, 1);
   assert.equal(bot.renderedReports[0].nickname, 'ExplicitNick');
-  assert.ok(bot.sent('sendPhoto').every(message => !hasContinue(message)));
+  noContinuation(bot);
   assert.ok(bot.sent('sendPhoto').every(message => message.message_thread_id === 7 && !Object.hasOwn(message, 'caption')));
   const job = await bot.db.get('SELECT * FROM report_jobs');
   assert.equal(job.status, 'ready');
@@ -50,43 +61,57 @@ test('local stats completes more than eight checkpoints in one slash command and
   assert.equal(JSON.parse(job.state).step, 17);
 });
 
-test('default Serverless invocation still advances one batch and offers a continuation button', async t => {
+test('default invocation automatically advances all available batches without asking the user to continue', async t => {
   const bot = await makeHarness(t, { faceitOverrides: stepsUntilDone(17) });
   await bot.send('/stats Nick');
-  assert.equal(bot.advances.length, 1);
+  assert.equal(bot.advances.length, 17);
   assert.equal(bot.sent('sendPhoto').length, 1);
   assert.equal(bot.sent().length, 0);
-  assert.equal(bot.renderedReports[0].kind, 'notice');
-  assert.ok(hasContinue(bot.sent('sendPhoto')[0]));
-  assert.equal((await bot.db.get('SELECT * FROM report_jobs')).version, 1);
+  assert.equal(bot.renderedReports[0].kind, 'stats');
+  noContinuation(bot);
+  assert.equal((await bot.db.get('SELECT * FROM report_jobs')).version, 17);
 });
 
-test('FACEIT Retry-After immediately saves progress and pauses without automatically retrying', async t => {
-  const now = 1800000000;
+test('FACEIT Retry-After saves progress, releases the lease and silently waits before retrying', async t => {
+  const start = 1800000000;
+  let now = start;
+  let waits = 0;
   const bot = await makeHarness(t, {
+    now: () => now,
     settings: AUTO,
     faceitOverrides: {
-      start: (nickname, kind) => ({ nickname, kind, phase: 'history' }),
-      advance: state => ({ done: false, state: { ...state, retryAt: now + 40 }, progress: { retryAt: now + 40 } }),
+      start: (nickname, kind) => ({ nickname, kind, phase: 'history', step: 0 }),
+      advance: state => state.step === 0
+        ? { done: false, state: { ...state, step: 1, retryAt: start + 40 }, progress: { retryAt: start + 40 } }
+        : { done: true, state: { ...state, phase: 'done', retryAt: null }, report: fixtureReport(state.kind, state.nickname) },
     },
   });
+  bot.dependencies.waitUntil = async retryAt => {
+    waits++;
+    assert.equal(retryAt, start + 40);
+    const saved = await bot.db.get('SELECT * FROM report_jobs');
+    assert.equal(saved.status, 'pending');
+    assert.equal(saved.lease_until, 0);
+    assert.equal(JSON.parse(saved.state).retryAt, retryAt);
+    assert.equal(bot.sent().length, 0);
+    assert.equal(bot.sent('sendPhoto').length, 0);
+    now = retryAt;
+    return true;
+  };
+  bot.restart();
   await bot.send('/stats Nick');
-  assert.equal(bot.advances.length, 1);
+  assert.equal(waits, 1);
+  assert.equal(bot.advances.length, 2);
   assert.equal(bot.sent().length, 0);
   assert.equal(bot.sent('sendPhoto').length, 1);
-  assert.match(bot.renderedReports[0].message, /подождать ещё 40 сек/);
-  assert.ok(hasContinue(bot.sent('sendPhoto')[0]));
+  assert.equal(bot.renderedReports[0].kind, 'stats');
+  noContinuation(bot);
   const job = await bot.db.get('SELECT * FROM report_jobs');
-  assert.equal(job.status, 'pending');
+  assert.equal(job.status, 'ready');
   assert.equal(job.lease_until, 0);
-  await bot.click(`continue:${job.job_id}`);
-  assert.equal(bot.advances.length, 1);
-  assert.equal((await bot.db.get('SELECT * FROM report_jobs')).version, 1);
-  assert.match(bot.renderedReports.at(-1).message, /подождать ещё 40 сек/);
-  assert.equal(bot.sent().length, 0);
 });
 
-test('automatic advancement stops permanently on unresolved dense history', async t => {
+test('automatic advancement stops permanently on unresolved dense history with final text only', async t => {
   const bot = await makeHarness(t, {
     settings: AUTO,
     faceitOverrides: {
@@ -95,37 +120,37 @@ test('automatic advancement stops permanently on unresolved dense history', asyn
   });
   await bot.send('/stats Nick');
   assert.equal(bot.advances.length, 1);
-  assert.equal(bot.sent().length, 0);
-  assert.equal(bot.sent('sendPhoto').length, 1);
-  assert.match(bot.renderedReports[0].message, /история слишком плотная/);
-  assert.ok(!hasContinue(bot.sent('sendPhoto')[0]));
+  finalRefusal(bot);
+  assert.match(bot.sent()[0].text, /история слишком плотная/i);
   const job = await bot.db.get('SELECT * FROM report_jobs');
   assert.equal(job.status, 'blocked');
   await bot.click(`continue:${job.job_id}`);
   assert.equal(bot.advances.length, 1);
+  finalRefusal(bot, 2);
 });
 
-test('automatic batch count is clamped at 32 and leaves a resumable pending checkpoint', async t => {
+test('automatic batch count is clamped at 32 and a legacy callback can resume its pending checkpoint', async t => {
   const bot = await makeHarness(t, { settings: { ...AUTO, autoAdvanceBatches: 10000 }, faceitOverrides: stepsUntilDone(40) });
   await bot.send('/stats Nick');
   assert.equal(bot.advances.length, 32);
-  assert.equal(bot.sent().length, 0);
-  assert.equal(bot.sent('sendPhoto').length, 1);
-  assert.ok(hasContinue(bot.sent('sendPhoto').at(-1)));
+  finalRefusal(bot);
   const job = await bot.db.get('SELECT * FROM report_jobs');
   assert.equal(job.version, 32);
   assert.equal(job.status, 'pending');
   await bot.click(`continue:${job.job_id}`);
   assert.equal(bot.advances.length, 40);
   assert.equal((await bot.db.get('SELECT * FROM report_jobs')).status, 'ready');
+  assert.equal(bot.sent().length, 1);
+  assert.equal(bot.sent('sendPhoto').length, 1);
+  noContinuation(bot);
 });
 
-test('explicit small or invalid automatic batch budgets remain bounded', async t => {
-  for (const [budget, expected] of [[2, 2], [0, 1], [-10, 1], ['invalid', 1]]) {
+test('explicit small or invalid automatic batch budgets remain bounded and never send progress images', async t => {
+  for (const [budget, expected] of [[2, 2], [0, 1], [-10, 1], ['invalid', 32]]) {
     const bot = await makeHarness(t, { settings: { ...AUTO, autoAdvanceBatches: budget }, faceitOverrides: stepsUntilDone(40) });
     await bot.send('/stats Nick');
     assert.equal(bot.advances.length, expected);
-    assert.ok(hasContinue(bot.sent('sendPhoto').at(-1)));
+    finalRefusal(bot);
   }
 });
 
@@ -139,7 +164,7 @@ test('automatic deadline defaults to 90 seconds and clamps configured time at 12
     });
     await bot.send('/stats Nick');
     assert.equal(bot.advances.length, expected);
-    assert.ok(hasContinue(bot.sent('sendPhoto').at(-1)));
+    finalRefusal(bot);
     assert.equal((await bot.db.get('SELECT * FROM report_jobs')).status, 'pending');
   }
 });
@@ -155,6 +180,7 @@ test('healthy automatic flow performs no loading-message or intermediate-photo P
   assert.equal(bot.sent().length, 0);
   assert.equal(bot.sent('sendPhoto').length, 1);
   assert.equal(bot.renderedReports[0].kind, 'stats');
+  noContinuation(bot);
 });
 
 test('ready callback after automatic completion cannot duplicate its only image', async t => {
@@ -173,23 +199,28 @@ test('ready callback after automatic completion cannot duplicate its only image'
   assert.equal((await bot.db.get('SELECT * FROM report_jobs')).version, 10);
 });
 
-test('invocation guard stops before leasing and allows the same pending job to resume', async t => {
+test('an expired invocation performs no profile or report requests; a legacy job can resume in a fresh invocation', async t => {
   let allowed = false;
   const bot = await makeHarness(t, { settings: AUTO, faceitOverrides: stepsUntilDone(3) });
   bot.dependencies.shouldContinue = () => allowed;
   bot.restart();
   await bot.send('/stats Nick');
+  assert.equal(bot.starts.length, 0);
   assert.equal(bot.advances.length, 0);
-  const pending = await bot.db.get('SELECT * FROM report_jobs');
+  finalRefusal(bot);
+  await bot.store.createJob('legacy-guard', -10, null, { kind: 'stats', nickname: 'Nick', phase: 'history', step: 0 });
+  await bot.click('continue:legacy-guard');
+  assert.equal(bot.advances.length, 0);
+  const pending = await bot.store.getJob('legacy-guard');
   assert.equal(pending.status, 'pending');
   assert.equal(pending.version, 0);
   assert.equal(pending.lease_until, 0);
-  assert.ok(hasContinue(bot.sent('sendPhoto').at(-1)));
+  finalRefusal(bot, 2);
   allowed = true;
   bot.restart();
-  await bot.click(`continue:${pending.job_id}`);
+  await bot.click('continue:legacy-guard');
   assert.equal(bot.advances.length, 3);
-  assert.equal((await bot.db.get('SELECT * FROM report_jobs')).status, 'ready');
+  assert.equal((await bot.store.getJob('legacy-guard')).status, 'ready');
   assert.equal(bot.renderedReports.at(-1).kind, 'stats');
 });
 
@@ -199,8 +230,10 @@ test('invocation guard is forwarded per batch and stops after saving a partial c
   const bot = await makeHarness(t, {
     settings: AUTO,
     faceitOverrides: stepsUntilDone(3, (state, budget) => {
-      assert.equal(budget.shouldContinue, guard);
+      assert.equal(typeof budget.shouldContinue, 'function');
+      assert.equal(budget.shouldContinue(), true);
       allowed = false;
+      assert.equal(budget.shouldContinue(), false);
     }),
   });
   bot.dependencies.shouldContinue = guard;
@@ -212,7 +245,7 @@ test('invocation guard is forwarded per batch and stops after saving a partial c
   assert.equal(job.version, 1);
   assert.equal(job.lease_until, 0);
   assert.equal(JSON.parse(job.state).step, 1);
-  assert.ok(hasContinue(bot.sent('sendPhoto').at(-1)));
+  finalRefusal(bot);
   await bot.click(`continue:${job.job_id}`);
   assert.equal(bot.advances.length, 1, 'an expired invocation cannot advance a continuation');
 });
@@ -221,7 +254,8 @@ test('ready callbacks remain deliverable and deduplicated after the invocation r
   let allowed = true;
   const guard = () => allowed;
   const bot = await makeHarness(t, { settings: AUTO, faceitOverrides: stepsUntilDone(1, (state, budget) => {
-    assert.equal(budget.shouldContinue, guard);
+    assert.equal(typeof budget.shouldContinue, 'function');
+    assert.equal(budget.shouldContinue(), true);
     allowed = false;
   }) });
   bot.dependencies.shouldContinue = guard;
@@ -237,27 +271,30 @@ test('ready callbacks remain deliverable and deduplicated after the invocation r
   assert.equal((await bot.db.get('SELECT * FROM report_jobs')).version, 1);
 });
 
-test('the invocation guard also reaches the initial report-cache history pre-scan', async t => {
-  const guard = () => false;
+test('the initial report-cache history pre-scan uses the same invocation guard and never reads a stale cached report', async t => {
+  let allowed = true;
   const bot = await makeHarness(t, {
     settings: AUTO,
     faceitOverrides: {
       start: (nickname, kind) => ({ nickname, kind, phase: 'history' }),
       advance: (state, budget) => {
         assert.equal(budget.historyOnly, true);
-        assert.equal(budget.shouldContinue, guard);
+        assert.equal(typeof budget.shouldContinue, 'function');
+        assert.equal(budget.shouldContinue(), true);
+        allowed = false;
         assert.equal(budget.shouldContinue(), false);
         return { done: false, state, progress: {} };
       },
     },
   });
-  bot.dependencies.shouldContinue = guard;
+  bot.dependencies.shouldContinue = () => allowed;
   bot.dependencies.reportCache = { get: () => { assert.fail('incomplete history cannot be a cache hit'); } };
   bot.restart();
   await bot.send('/stats Nick');
+  assert.equal(bot.starts.length, 1);
   assert.equal(bot.advances.length, 1);
   const job = await bot.db.get('SELECT * FROM report_jobs');
   assert.equal(job.version, 0);
   assert.equal(job.status, 'pending');
-  assert.ok(hasContinue(bot.sent('sendPhoto').at(-1)));
+  finalRefusal(bot);
 });

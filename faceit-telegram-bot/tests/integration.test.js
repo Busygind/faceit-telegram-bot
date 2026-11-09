@@ -35,6 +35,7 @@ async function harness({ pauseStats = false, photoFailure = false } = {}) {
   const calls = [];
   const requests = [];
   const renderedReports = [];
+  const waits = [];
   const { store, db } = await makeStore(() => clock);
   const faceit = createFaceitService({ now: () => clock, key: 'fixture-server-key', fetch: async (url) => {
     const parsed = new URL(url);
@@ -66,7 +67,15 @@ async function harness({ pauseStats = false, photoFailure = false } = {}) {
   };
   const bot = createBot({ api, store, faceit, settings: { maxRequests: 2 },
     sealer: {}, renderCard: report => { renderedReports.push(structuredClone(report)); return renderReportCard(report); },
-    inputFile: (bytes) => bytes, now: () => clock });
+    inputFile: (bytes) => bytes, now: () => clock, waitUntil: async retryAt => {
+      const job = await db.get('SELECT * FROM report_jobs');
+      waits.push({ retryAt, phase: JSON.parse(job.state).phase });
+      assert.equal(job.status, 'pending');
+      assert.equal(job.lease_until, 0);
+      assert.equal(calls.length, 0, 'waiting must not produce intermediate text or images');
+      clock = retryAt;
+      return true;
+    } });
   const user = { id: 99, is_bot: false };
   const group = { id: CHAT, type: 'supergroup' };
   const message = (text) => ({ text, from: user, chat: group, message_thread_id: TOPIC, message_id: messageId++ });
@@ -82,27 +91,21 @@ async function harness({ pauseStats = false, photoFailure = false } = {}) {
     { update: { update_id: updateId++ } });
     return store.getJob(job.job_id);
   };
-  return { db, store, bot, calls, requests, renderedReports, send, continueJob, message, setTime: (value) => { clock = value; } };
+  return { db, store, bot, calls, requests, renderedReports, waits, send, continueJob, message, setTime: (value) => { clock = value; } };
 }
 
-test('real FACEIT core + SQLite + bot: last resumes after 429 and retains original chat/topic', async (t) => {
+test('real FACEIT core + SQLite + bot: last silently waits after 429 and replies once in the original chat/topic', async (t) => {
   const h = await harness({ pauseStats: true });
   t.after(() => h.db.close());
   await h.send('/last@TESTFACEITBOT ActualPlayer');
-  let job = await h.continueJob();
-  assert.equal(job.state.phase, 'stats');
-  assert.equal(job.state.retryAt, TIME + 10);
-  assert.equal(job.status, 'pending');
-  const requestCount = h.requests.length;
-  job = await h.continueJob();
-  assert.equal(h.requests.length, requestCount);
-  assert.equal(job.state.phase, 'stats');
-  await h.continueJob(-200);
-  assert.equal(h.requests.length, requestCount, 'cross-chat callback must not access the job');
-  h.setTime(TIME + 11);
-  job = await h.continueJob();
+  const job = await h.db.get('SELECT * FROM report_jobs');
+  const state = JSON.parse(job.state);
   assert.equal(job.status, 'ready');
-  assert.equal(job.state.matches[0].matchId, sample.match_id);
+  assert.equal(state.matches[0].matchId, sample.match_id);
+  assert.deepEqual(h.waits, [{ retryAt: TIME + 11, phase: 'stats' }]);
+  assert.equal(h.requests.filter(url => url.pathname.endsWith('/stats')).length, 2);
+  assert.equal(h.requests.filter(url => url.pathname.endsWith('/' + sample.match_id)).length, 1,
+    'the saved match detail must not be fetched again after waiting');
   const report = h.renderedReports.find(report => report.kind === 'last');
   assert.ok(report);
   assert.equal(report.nickname, 'ActualPlayer');
@@ -117,6 +120,7 @@ test('real FACEIT core + SQLite + bot: last resumes after 429 and retains origin
   assert.equal(dimensions.getUint32(20), 1360);
   assert.equal(overview.payload.chat_id, CHAT);
   assert.equal(overview.payload.message_thread_id, TOPIC);
+  assert.deepEqual(overview.payload.reply_parameters, { message_id: 10, allow_sending_without_reply: true });
   assert.equal(h.renderedReports.filter(report => report.kind === 'last').length, 1);
   assert.equal(h.calls.filter(({ method }) => method === 'sendMessage').length, 0);
   assert.ok(h.calls.filter(({ method }) => method === 'sendPhoto').every(({ payload }) => !Object.hasOwn(payload, 'caption')));
@@ -125,7 +129,7 @@ test('real FACEIT core + SQLite + bot: last resumes after 429 and retains origin
   assert.equal(h.calls.length, countAfterDelivery, 'ready report delivery is idempotent');
 });
 
-test('real stats report generates FACEIT Dark PNG with a rejection tombstone and no text fallback', async (t) => {
+test('real stats report generates FACEIT Dark PNG and a definite rejection returns one final text', async (t) => {
   const h = await harness({ photoFailure: true });
   t.after(() => h.db.close());
   await h.send('/stats ActualPlayer');
@@ -144,13 +148,16 @@ test('real stats report generates FACEIT Dark PNG with a rejection tombstone and
   assert.equal(h.renderedReports.filter(report => report.kind === 'stats').length, 1);
   assert.equal(photos.at(-1).payload.chat_id, CHAT);
   assert.equal(photos.at(-1).payload.message_thread_id, TOPIC);
-  assert.equal(h.calls.filter(({ method }) => method === 'sendMessage').length, 0);
+  assert.equal(h.calls.filter(({ method }) => method === 'sendMessage').length, 1);
+  const refusal = h.calls.find(({ method }) => method === 'sendMessage').payload;
+  assert.equal(refusal.reply_markup, undefined);
+  assert.match(refusal.text, /Не удалось отправить карточку/);
   const { status } = await h.db.get("SELECT status FROM deliveries WHERE kind='photo'");
   assert.equal(status, 'rejected');
   const photoCount = photos.length;
   await h.continueJob();
   assert.equal(h.calls.filter(({ method }) => method === 'sendPhoto').length, photoCount);
-  assert.equal(h.calls.filter(({ method }) => method === 'sendMessage').length, 0);
+  assert.equal(h.calls.filter(({ method }) => method === 'sendMessage').length, 1);
 });
 
 test('real core does not call FACEIT without explicit nickname and never stores API key in jobs', async (t) => {
