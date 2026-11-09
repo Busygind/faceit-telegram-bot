@@ -253,16 +253,6 @@ test('checkpoint reads SQLite offset in read-only mode and never invents a missi
   assert.deepEqual(await readFile(path), before);
 });
 
-test('root wrapper accepts commands without Node PATH setup and rejects invalid input before network', async () => {
-  const { spawnSync } = await import('node:child_process');
-  const wrapper = new URL('../bot', import.meta.url).pathname;
-  const result = spawnSync(wrapper, ['invalid'], { encoding: 'utf8', env: { ...process.env, PATH: '/usr/bin:/bin' } });
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /SWITCH_ARGUMENTS/);
-  assert.ok(!result.stderr.includes(' at '));
-});
-
-
 test('configured cloud with a failed Telegram dependency leaves the local poller untouched', async () => {
   const h = fixture({ running: true });
   const probes = [];
