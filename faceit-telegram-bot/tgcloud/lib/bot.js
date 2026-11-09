@@ -20,7 +20,9 @@ function command(text) {
   return match ? { name: match[1].toLowerCase(), bot: match[2]?.toLowerCase(), args: match[3] ?? '' } : null;
 }
 function context(message) {
-  return { chatId: message.chat.id, topicId: message.message_thread_id ?? null };
+  // A reply thread ID alone does not identify a forum topic. In particular,
+  // a callback's message can carry a different thread ID outside a topic.
+  return { chatId: message.chat.id, topicId: message.is_topic_message === true ? message.message_thread_id ?? null : null };
 }
 function destination(ctx) {
   return { chat_id: ctx.chatId, ...(ctx.topicId == null ? {} : { message_thread_id: ctx.topicId }) };

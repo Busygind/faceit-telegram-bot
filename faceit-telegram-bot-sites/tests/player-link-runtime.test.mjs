@@ -22,7 +22,7 @@ test('cloud personal FACEIT survives cold invocations, uses the caller binding a
   let update = 0;
   async function invoke(text, { userId = 1, chatId = -10, callback, messageFields = {} } = {}) {
     const id = ++update;
-    const message = { message_id: id, chat: { id: chatId, type: 'supergroup' }, message_thread_id: 77,
+    const message = { message_id: id, chat: { id: chatId, type: 'supergroup' }, message_thread_id: 77, is_topic_message: true,
       from: { id: userId, is_bot: false }, text, ...messageFields };
     const fetch = async (url, options) => {
       assert.equal(options.redirect, 'manual'); const target = new URL(url);

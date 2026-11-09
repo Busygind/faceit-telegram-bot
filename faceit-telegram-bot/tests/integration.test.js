@@ -69,7 +69,7 @@ async function harness({ pauseStats = false, photoFailure = false } = {}) {
     inputFile: (bytes) => bytes, now: () => clock });
   const user = { id: 99, is_bot: false };
   const group = { id: CHAT, type: 'supergroup' };
-  const message = (text) => ({ text, from: user, chat: group, message_thread_id: TOPIC, message_id: messageId++ });
+  const message = (text) => ({ text, from: user, chat: group, message_thread_id: TOPIC, is_topic_message: true, message_id: messageId++ });
   const send = async (text) => {
     const update = { update_id: updateId++ };
     await bot.handleMessage(message(text), { update });
@@ -78,7 +78,7 @@ async function harness({ pauseStats = false, photoFailure = false } = {}) {
   const continueJob = async (chatId = CHAT) => {
     const [job] = await db.all('SELECT * FROM report_jobs');
     await bot.handleCallback({ id: `callback-${updateId}`, from: user, data: `continue:${job.job_id}`,
-      message: { chat: { ...group, id: chatId }, message_thread_id: TOPIC, message_id: 20 } },
+      message: { chat: { ...group, id: chatId }, message_thread_id: TOPIC, is_topic_message: true, message_id: 20 } },
     { update: { update_id: updateId++ } });
     return store.getJob(job.job_id);
   };
